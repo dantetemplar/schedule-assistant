@@ -14,17 +14,13 @@ import yaml
 from ortools.sat.python import cp_model
 from tqdm import tqdm
 
-from config import ScheduleConfig, SettingBaseModel, expand_groups, resolve_selector_map
-
-DAY_TO_WEEKDAY = {
-    "Mon": 0,
-    "Tue": 1,
-    "Wed": 2,
-    "Thu": 3,
-    "Fri": 4,
-    "Sat": 5,
-    "Sun": 6,
-}
+from config import (
+    ScheduleConfig,
+    SettingBaseModel,
+    Weekday,
+    expand_groups,
+    resolve_selector_map,
+)
 
 
 class _YamlDumper(yaml.SafeDumper):
@@ -219,21 +215,15 @@ class SolveResult(SettingBaseModel):
 
 def teaching_days(cfg: ScheduleConfig) -> list[str]:
     """Build one teaching week ordered from `term.starting_day`."""
-    configured_days: list[str] = []
-    seen_days: set[str] = set()
-    for raw_day in cfg.term.days:
-        day = str(raw_day).strip()
-        if day not in DAY_TO_WEEKDAY or day in seen_days:
-            continue
-        seen_days.add(day)
-        configured_days.append(day)
+    configured_days = list(dict.fromkeys(cfg.term.days))
     if not configured_days:
         return []
-    start_day = str(cfg.term.starting_day).strip()
+    start_day = cfg.term.starting_day
     if start_day not in configured_days:
-        return configured_days
+        return [day.value for day in configured_days]
     start_idx = configured_days.index(start_day)
-    return configured_days[start_idx:] + configured_days[:start_idx]
+    ordered = configured_days[start_idx:] + configured_days[:start_idx]
+    return [day.value for day in ordered]
 
 
 def _compact_multiline(text: str) -> str:
@@ -1009,8 +999,10 @@ def apply_warm_start_hints(
     day_to_idx = {d: i for i, d in enumerate(days)}
     room_to_idx = {r: i for i, r in enumerate(room_ids)}
     slot_to_idx: dict[str, int] = {}
-    for i, t in enumerate(cfg.term.time_slots):
-        slot_to_idx[t.strftime("%H:%M:%S")] = i
+    for i, slot in enumerate(cfg.term.time_slots):
+        start = slot.start_time
+        slot_to_idx[start.strftime("%H:%M:%S")] = i
+        slot_to_idx[start.strftime("%H:%M")] = i
 
     def normalize_time(raw: object) -> str | None:
         if isinstance(raw, datetime.time):
@@ -1541,14 +1533,11 @@ def solve_schedule(
         return _empty_result("no meetings to schedule", slots_count=num_days * slots_per_day)
 
     weekend_day_indices = frozenset(
-        i for i, d in enumerate(days) if d in ("Sat", "Sun")
+        i for i, d in enumerate(days) if Weekday(d).index >= 5
     )
     late_cutoff = datetime.time(18, 0)
     late_slot_indices = frozenset(
-        i
-        for i, slot in enumerate(cfg.term.time_slots)
-        if (datetime.datetime.combine(datetime.date.min, slot) + datetime.timedelta(minutes=90)).time()
-        > late_cutoff
+        i for i, slot in enumerate(cfg.term.time_slots) if slot.end_time > late_cutoff
     )
 
     prepared, prepare_error = prepare_model(
@@ -1659,7 +1648,7 @@ def solve_schedule(
                 inst_opt_idx = solver.Value(prepared.inst_choice_vars[m_idx])
 
                 day_name = days[di]
-                slot_time = cfg.term.time_slots[t_idx]
+                slot_time = cfg.term.time_slots[t_idx].start_time
                 room_id = room_ids[r_val]
                 chosen_insts = m.instructor_options[inst_opt_idx] if m.instructor_options else []
                 chosen_inst_entry: str | list[str]

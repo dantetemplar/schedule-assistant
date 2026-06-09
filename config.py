@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import datetime
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Literal
 
@@ -10,6 +12,32 @@ from pydantic import BaseModel, ConfigDict, Field
 
 class SettingBaseModel(BaseModel):
     model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid", populate_by_name=True)
+
+
+class Weekday(StrEnum):
+    MONDAY = "MONDAY"
+    TUESDAY = "TUESDAY"
+    WEDNESDAY = "WEDNESDAY"
+    THURSDAY = "THURSDAY"
+    FRIDAY = "FRIDAY"
+    SATURDAY = "SATURDAY"
+    SUNDAY = "SUNDAY"
+
+    @property
+    def index(self) -> int:
+        return list(Weekday).index(self)
+
+
+def week_start_for_date(value: datetime.date, starting_day: Weekday = Weekday.MONDAY) -> datetime.date:
+    """First day of the calendar week containing ``value`` (week aligned to ``starting_day``)."""
+    return value - datetime.timedelta(days=(value.weekday() - starting_day.index) % 7)
+
+
+class TermTimeSlot(SettingBaseModel):
+    start_time: datetime.time
+    "Slot start time"
+    end_time: datetime.time
+    "Slot end time"
 
 
 class TermConfig(SettingBaseModel):
@@ -23,20 +51,27 @@ class TermConfig(SettingBaseModel):
     "Academic term name (for example, Fall 2025)"
     semester: DateRange
     "Single teaching period (start and end dates inclusive)"
-    days: list[str] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
-    "Working days used by the scheduler (for example, Mon..Sat)"
-    starting_day: str = "Mon"
-    "Starting day of the week (for example, Mon)"
-    time_slots: list[datetime.time] = [
-        datetime.time(9, 0), # 09:00-10:30
-        datetime.time(10, 40), # 10:40-12:10
-        datetime.time(12, 40), # 12:40-14:10
-        datetime.time(14, 20), # 14:20-15:50 
-        datetime.time(16, 00), # 16:00-17:30
-        datetime.time(17, 40), # 17:40-19:10
-        datetime.time(19, 20), # 19:20-20:50
+    days: list[Weekday] = [
+        Weekday.MONDAY,
+        Weekday.TUESDAY,
+        Weekday.WEDNESDAY,
+        Weekday.THURSDAY,
+        Weekday.FRIDAY,
+        Weekday.SATURDAY,
     ]
-    "Slot start times; YAML/JSON may use ``HH:MM`` strings, which are parsed to time"
+    "Working days used by the scheduler (for example, MONDAY..SATURDAY)"
+    starting_day: Weekday = Weekday.MONDAY
+    "Starting day of the week (for example, MONDAY)"
+    time_slots: list[TermTimeSlot] = [
+        TermTimeSlot(start_time=datetime.time(9, 0), end_time=datetime.time(10, 30)),
+        TermTimeSlot(start_time=datetime.time(10, 40), end_time=datetime.time(12, 10)),
+        TermTimeSlot(start_time=datetime.time(12, 40), end_time=datetime.time(14, 10)),
+        TermTimeSlot(start_time=datetime.time(14, 20), end_time=datetime.time(15, 50)),
+        TermTimeSlot(start_time=datetime.time(16, 0), end_time=datetime.time(17, 30)),
+        TermTimeSlot(start_time=datetime.time(17, 40), end_time=datetime.time(19, 10)),
+        TermTimeSlot(start_time=datetime.time(19, 20), end_time=datetime.time(20, 50)),
+    ]
+    "Teaching slots for the term"
 
 
 class RoomConfig(SettingBaseModel):
@@ -51,10 +86,16 @@ class RoomConfig(SettingBaseModel):
 class InstructorConfig(SettingBaseModel):
     id: str
     "Instructor unique identifier"
-    name: str
-    "Instructor display name"
-    role: str | None = None
-    "Instructor role (for example, professor or teaching_assistant)"
+    name_en: str | None = None
+    "English display name"
+    name_ru: str | None = None
+    "Russian display name"
+    email: str | None = None
+    "Work email when known"
+    alias: str | None = None
+    "Short handle or Telegram-style alias from staff roster"
+    position: str | None = None
+    "Staff position from roster (for example, Professor, Visiting)"
 
 
 class SectionConfig(SettingBaseModel):
@@ -88,7 +129,6 @@ class SectionConfig(SettingBaseModel):
         groups: list[str] = []
         "Program-level groups when tracks are not used (for example, elective bucket ids)"
 
-
     code: str
     "Section identifier"
     name: str
@@ -115,12 +155,86 @@ class StudentsGroups(SettingBaseModel):
 type CommonCourseTags = Literal["core_course", "elective", "english"]
 type CommonCourseClassTags = Literal["lec", "tut", "lab", "class"]
 
+
+class WeeklyPatternSlotEdit(SettingBaseModel):
+    """Override or cancel one weekly pattern occurrence in a selected week."""
+
+    select_week: datetime.date
+    "Date (YYYY-MM-DD) identifying the week (any day in that week)"
+    cancel: bool = False
+    "If true, skip this meeting for the selected week"
+    date: datetime.date | None = None
+    "Optional concrete meeting date; defaults to ``weekday`` in that week"
+    start_time: datetime.time | None = None
+    "Optional meeting start; defaults to the pattern start_time"
+    end_time: datetime.time | None = None
+    "Optional meeting end; defaults to the pattern end_time"
+    room: str | None = None
+    "Optional room id; defaults to the pattern room"
+    instructor: str | list[str] | None = None
+    "Optional instructor id(s); defaults to the pattern instructor"
+
+
+class WeeklyPatternSlot(SettingBaseModel):
+    """Fixed weekly day/time for one meeting in a recurring core-course component."""
+
+    weekday: Weekday
+    "Weekday name (for example, MONDAY)"
+    start_time: datetime.time
+    "Meeting start time"
+    end_time: datetime.time
+    "Meeting end time"
+    room: str | None = None
+    "Room id from spreadsheet (for example, 460 or ONLINE)"
+    instructor: str | list[str] | None = None
+    "Instructor id, or list of ids for co-teaching"
+    edits: list[WeeklyPatternSlotEdit] | None = None
+    "Per-week overrides or cancellations keyed by ``select_week``"
+
+
+@dataclass(frozen=True)
+class ResolvedWeeklyMeeting:
+    date: datetime.date
+    start_time: datetime.time
+    end_time: datetime.time
+    room: str | None
+    instructor: str | list[str] | None
+
+
+class SessionOccurrence(SettingBaseModel):
+    """One concrete placed meeting (date, time, room, instructor)."""
+
+    date: datetime.date
+    "Meeting date (YYYY-MM-DD)"
+    start_time: datetime.time
+    "Meeting start time"
+    end_time: datetime.time
+    "Meeting end time"
+    room: str | None = None
+    "Room id (None or empty if unknown)"
+    instructor: str | list[str] | None = None
+    "Instructor id(s) for this meeting"
+
+
+class ComponentSessionSeries(SettingBaseModel):
+    """Placed meeting series for a component (electives use calendar dates)."""
+
+    audience: list[str] = []
+    "Student group ids for this session series (subset of component student_groups)"
+    weekly_pattern: list[WeeklyPatternSlot] | None = None
+    "Fixed weekly slots for core courses"
+    occurrences: list[SessionOccurrence] | None = None
+    "Concrete placed meetings (for electives and other calendar-date series)"
+
+
 class CourseConfig(SettingBaseModel):
     class Component(SettingBaseModel):
         tag: CommonCourseClassTags | str
         "Class tag (for example, lec, tut, lab, class)"
-        per_week: int = 1
+        per_week: int | None = None
         "Number of weekly meetings"
+        per_semester: int | None = None
+        "Total meetings across the semester (for electives and other non-weekly patterns)"
         instructor_pool: list[str | list[str]] = []
         """
         Candidate instructors; nested list means co-teaching set
@@ -146,6 +260,8 @@ class CourseConfig(SettingBaseModel):
         "Whether one class instance should be created per group, if True, then one class instance will be created for each group in student_groups. It is useful for lab classes where each group needs a separate meeting. If false, then one class instance (meeting) will be created for all groups in student_groups, so they will be effectively in same time, same room, same instructor."
         relates_to: int | list[int] | None = None
         "Optional component index or list of indices that this component depends on for same-day/order/back-to-back preferences."
+        sessions: list[ComponentSessionSeries] | None = None
+        "Concrete placed sessions when known (for example, summer electives from spreadsheet dates)"
 
     name: str
     "Course name"
@@ -185,6 +301,27 @@ class ScheduleConfig(SettingBaseModel):
                 **cls.model_json_schema(),
             }
             yaml.dump(schema, f, sort_keys=False)
+
+    @classmethod
+    def openapi_schema(cls) -> dict:
+        ref = "#/components/schemas/{model}"
+        root = cls.model_json_schema(ref_template=ref)
+        defs = root.pop("$defs", {})
+        schemas = {**defs, cls.__name__: root}
+        return {
+            "openapi": "3.1.0",
+            "info": {
+                "title": "Schedule Assistant Config",
+                "version": "0.1.0",
+                "description": "OpenAPI schema for schedule-assistant YAML configuration files.",
+            },
+            "components": {"schemas": schemas},
+        }
+
+    @classmethod
+    def save_openapi_schema(cls, path: Path) -> None:
+        with open(path, "w", encoding="utf-8") as f:
+            yaml.dump(cls.openapi_schema(), f, sort_keys=False)
 
 
 def resolve_selector_map(cfg: ScheduleConfig) -> dict[str, set[str]]:

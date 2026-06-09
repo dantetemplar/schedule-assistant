@@ -7,6 +7,10 @@ predefined.json
 cpsat-primer-README.md
 cpsat-primer-examples/
 MIGRATE.md
+schedule-assistant.code-workspace
+*.json
+*.csv
+*.yaml
 
 # Created by https://www.toptal.com/developers/gitignore/api/python,vs,pycharm+all,macos,windows,linux
 # Edit at https://www.toptal.com/developers/gitignore?templates=python,vs,pycharm+all,macos,windows,linux

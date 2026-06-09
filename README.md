@@ -16,8 +16,10 @@ Run commands with `uv run …` so they use the project environment (examples bel
 ## Generate configs 
 
 ```bash
-uv run convert_json_to_config_candidate.py core-courses-lessons-spring-2026.json
+uv run convert_json_to_config_candidate.py
 ```
+
+Reads `core-courses-lessons-sum-2026.yaml` and merges `electives-lessons-sum-2026.yaml` from the project directory (or cwd). Override paths with positional `core_courses_yaml` and `electives_yaml`.
 
 ```bash
 uv run tests/cases/generate_cases.py
@@ -31,7 +33,7 @@ uv run main.py tests/cases/feasible_by_program_year_block1/core_year_1.yaml --no
 
 Usage:
 ```txt
-dante@dante-pc:~/PycharmProjects/schedule-assistant$ uv run main.py --help
+dante@dante-pc:~/Projects/one-zero-eight/schedule-assistant$ uv run main.py --help
 usage: main.py [-h] [--time-limit TIME_LIMIT] [--num-workers NUM_WORKERS] [--artifacts-dir ARTIFACTS_DIR] [--no-progress] config
 
 positional arguments:

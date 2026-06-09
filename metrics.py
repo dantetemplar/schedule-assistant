@@ -124,11 +124,16 @@ from pathlib import Path
 
 import yaml
 
-from config import CourseConfig, ScheduleConfig, expand_groups, resolve_selector_map
+from config import (
+    CourseConfig,
+    ScheduleConfig,
+    Weekday,
+    expand_groups,
+    resolve_selector_map,
+)
 from main import Schedule, SolveResult, teaching_days
 
 TIME_SLOT_DURATION = datetime.timedelta(minutes=90)
-WEEKDAY_RANK = {"Mon": 0, "Tue": 1, "Wed": 2, "Thu": 3, "Fri": 4, "Sat": 5, "Sun": 6}
 WEEKDAYS_MON_SAT = frozenset(range(6))
 BAD_DAY_EVENT_THRESHOLD = 5
 BAD_DAY_DISTINCT_SUBJECTS_THRESHOLD = 3
@@ -213,9 +218,9 @@ def _slot_end(start: datetime.time) -> datetime.time:
 
 
 def _slot_index(start: datetime.time, time_slots: list[datetime.time]) -> int | None:
-    for i, t in enumerate(time_slots):
-        if t == start:
-            return i
+    for index, slot_start in enumerate(time_slots):
+        if slot_start == start:
+            return index
     return None
 
 
@@ -228,7 +233,7 @@ def _is_consecutive(a: FlatMeeting, b: FlatMeeting, time_slots: list[datetime.ti
 
 
 def _lec_tut_same_room_stats(events: list[FlatMeeting], cfg: ScheduleConfig) -> int:
-    time_slots = cfg.term.time_slots
+    time_slots = [slot.start_time for slot in cfg.term.time_slots]
     tuts_by_slot_room: dict[tuple[int, str, int, str], list[FlatMeeting]] = defaultdict(list)
     same_room_pairs: set[tuple[int, int, int]] = set()
     for e in events:
@@ -298,7 +303,7 @@ def _iter_flat_meetings(schedule: Schedule, cfg: ScheduleConfig) -> Iterator[Fla
                         component_tag=comp.tag,
                         groups=tuple(series.audience),
                         day=day,
-                        day_index=rank.get(day, WEEKDAY_RANK.get(day, 999)),
+                        day_index=rank.get(day, Weekday(day).index),
                         start_time=series.start_times[i],
                         room=series.rooms[i],
                         instructors=insts,
@@ -375,7 +380,7 @@ def _back_to_back_lecture_tutorial_scheduled(events: list[FlatMeeting], cfg: Sch
     # on the same day, and the tut occupies the slot immediately after the
     # lec. "Immediately after" is slot-index based (tut.slot == lec.slot + 1)
     # so fixed breaks between slots don't invalidate adjacency.
-    time_slots = cfg.term.time_slots
+    time_slots = [slot.start_time for slot in cfg.term.time_slots]
     tuts_by_day_slot: dict[tuple[int, str, int], list[FlatMeeting]] = defaultdict(list)
     for e in events:
         if str(e.component_tag).lower() == "tut":
@@ -619,11 +624,11 @@ def calculate_schedule_metrics(result: SolveResult, cfg: ScheduleConfig) -> Sche
     for e in events:
         event_hours = TIME_SLOT_DURATION.total_seconds() / 3600.0
         total_weighted_group_hours += event_hours * len(e.groups)
-        if e.day == "Sat":
+        if e.day == "SATURDAY":
             saturday_event_count += 1
         for g in e.groups:
             per_group_day_load[g][e.day] += 1
-            if WEEKDAY_RANK.get(e.day, 999) in WEEKDAYS_MON_SAT:
+            if Weekday(e.day).index in WEEKDAYS_MON_SAT:
                 per_group_day_subjects[g][e.day].add(e.course)
         for inst in e.instructors:
             per_inst_day_load[inst][e.day] += 1
@@ -727,7 +732,7 @@ def calculate_schedule_metrics(result: SolveResult, cfg: ScheduleConfig) -> Sche
     (
         instructor_room_swaps_consecutive_opportunities,
         instructor_room_swaps_consecutive,
-    ) = _instructor_room_swaps_consecutive(events, cfg.term.time_slots)
+    ) = _instructor_room_swaps_consecutive(events, [slot.start_time for slot in cfg.term.time_slots])
     b2b_possible, b2b_total = _back_to_back_lec_tut_counts(cfg)
     back_to_back_lec_tut_scheduled = _back_to_back_lecture_tutorial_scheduled(events, cfg)
     same_day_lec_tut_lab_possible = _same_day_lec_tut_lab_possible(cfg)

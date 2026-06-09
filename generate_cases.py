@@ -2,14 +2,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import yaml
-from config import TermConfig
 
 ROOT = Path(__file__).resolve().parent
-
-
-def _default_time_slots_from_config_class() -> list[str]:
-    default_slots = TermConfig.model_fields["time_slots"].default
-    return [slot.strftime("%H:%M") for slot in default_slots]
 
 
 def _group_codes_from_entries(entries: list | None) -> set[str]:
@@ -63,15 +57,6 @@ def _base_case_cfg(cfg: dict) -> dict:
     case_cfg = dict(cfg)
     case_cfg["term"] = dict(cfg["term"])
     case_cfg["term"]["semester"] = dict(cfg["term"]["semester"])
-    if "days" in cfg["term"]:
-        case_cfg["term"]["days"] = list(cfg["term"]["days"])
-    if "starting_day" in cfg["term"] and cfg["term"]["starting_day"]:
-        case_cfg["term"]["starting_day"] = cfg["term"]["starting_day"]
-    elif case_cfg["term"].get("days"):
-        case_cfg["term"]["starting_day"] = case_cfg["term"]["days"][0]
-    else:
-        case_cfg["term"]["starting_day"] = "Mon"
-    case_cfg["term"]["time_slots"] = _default_time_slots_from_config_class()
     return case_cfg
 
 

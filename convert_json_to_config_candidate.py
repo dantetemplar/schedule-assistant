@@ -1,19 +1,21 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import re
 from collections import defaultdict
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 from xml.etree import ElementTree as ET
 from zipfile import ZipFile
 
 import yaml
-from config import TermConfig
+
+from config import Weekday
 
 EXCLUDED_ROOM_IDS = {
     "1.1",
@@ -30,6 +32,10 @@ EXCLUDED_ROOM_IDS = {
     "425",
     "309A",
 }
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+DEFAULT_CORE_COURSES_YAML = Path("core-courses-lessons-sum-2026.yaml")
+DEFAULT_ELECTIVES_YAML = Path("electives-lessons-sum-2026.yaml")
 
 def _program_code(program: dict[str, Any]) -> str:
     return str(program.get("code") or program.get("id") or "").strip()
@@ -246,6 +252,12 @@ PROGRAMS: dict[str, list[dict[str, Any]]] = {
                     "groups": ["M25-AIDE-01"],
                 },
                 {
+                    "name": "Data Science",
+                    "code": "DS",
+                    "kind": "track",
+                    "groups": ["M25-DS-01"],
+                },
+                {
                     "name": "Robotics",
                     "code": "RO",
                     "kind": "track",
@@ -336,6 +348,7 @@ GROUP_ESTIMATED_SIZE: dict[str, int] = {
     "M25-SE-01": 15,
     "M25-SE-02": 15,
     "M25-AIDE-01": 27,
+    "M25-DS-01": 26,
     "M25-RO-01": 14,
     "M25-TE-01": 17,
     "M25-SNE-01": 21,
@@ -343,17 +356,6 @@ GROUP_ESTIMATED_SIZE: dict[str, int] = {
 }
 
 
-WEEKDAY_TO_SHORT = {
-    "MONDAY": "Mon",
-    "TUESDAY": "Tue",
-    "WEDNESDAY": "Wed",
-    "THURSDAY": "Thu",
-    "FRIDAY": "Fri",
-    "SATURDAY": "Sat",
-    "SUNDAY": "Sun",
-}
-
-ELECTIVE_ALIAS_PREFIXES = ("spring-bs2", "spring-bs3", "spring26-bs2", "spring26-bs3")
 IGNORED_ELECTIVE_GROUP_IDS = {"spring26-bs3-tech-fbds"}
 
 CLASS_TAG_MAP = {
@@ -371,20 +373,6 @@ CLASS_TAG_MAP = {
     "seminar": "sem",
 }
 
-def _default_term_days_from_config_class() -> list[str]:
-    return list(TermConfig.model_fields["days"].default)
-
-
-def _default_starting_day_from_config_class() -> str:
-    value = TermConfig.model_fields["starting_day"].default
-    return str(value) if value else "Mon"
-
-
-def _default_time_slots_from_config_class() -> list[str]:
-    default_slots = TermConfig.model_fields["time_slots"].default
-    return [slot.strftime("%H:%M") for slot in default_slots]
-
-
 @dataclass(frozen=True)
 class PatternKey:
     course: str
@@ -392,6 +380,13 @@ class PatternKey:
     room: str
     start_date: str
     end_date: str
+    stream_group: str = ""
+    sheet_scope: str = ""
+
+
+DATE_WEEKDAY_NAMES = tuple(day.value for day in Weekday)
+
+SUMMER_ELECTIVE_TERM_PREFIX = "SUM26"
 
 
 def normalize_class_tag(value: str | None) -> str:
@@ -401,8 +396,815 @@ def normalize_class_tag(value: str | None) -> str:
     return CLASS_TAG_MAP.get(cleaned, cleaned.replace(" ", "_"))
 
 
+_ACADEMIC_GROUP_ID_FIXES: dict[str, str] = {
+    "M25-RO-": "M25-RO-01",
+    "M25-RO15-01": "M25-RO-01",
+}
+
+
+def normalize_academic_group_id(group: str | None) -> str | None:
+    token = str(group or "").strip()
+    if not token:
+        return None
+    if token in _ACADEMIC_GROUP_ID_FIXES:
+        return _ACADEMIC_GROUP_ID_FIXES[token]
+    if token.endswith("-") and len(token) >= 6 and token[0] == "M" and token[3] == "-":
+        return f"{token}01"
+    return token
+
+
+def normalize_group_names(group_field: str | list[str] | tuple[str, ...] | None) -> list[str]:
+    if group_field is None:
+        return []
+    raw = list(group_field) if isinstance(group_field, (list, tuple)) else [group_field]
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        normalized = normalize_academic_group_id(str(item))
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            out.append(normalized)
+    return out
+
+
 def normalize_time(value: str) -> str:
     return value[:5]
+
+
+def format_time_range(start: str, end: str) -> str:
+    return f"{normalize_time(start)}-{normalize_time(end)}"
+
+
+def _normalize_room_value(room: str | None) -> str:
+    if room is None:
+        return ""
+    return str(room).strip()
+
+
+# (weekday, start_time, end_time, room, instructor_ids)
+WeeklySlotSig = tuple[str, str, str, str, tuple[str, ...]]
+
+EMAIL_PATTERN = re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}")
+
+USERS_CSV_DEFAULT_NAMES = (
+    "Руслану для плагина - People.25-26.csv",
+    "exportUsers_2026-4-14.csv",
+)
+
+
+def normalize_person_name(name: str) -> str:
+    return " ".join(name.split()).casefold()
+
+
+def _row_primary_email(row: dict[str, str]) -> str | None:
+    upn = str(row.get("userPrincipalName") or "").strip()
+    if upn and "@" in upn and "#EXT#" not in upn.upper():
+        return upn.lower()
+    for match in EMAIL_PATTERN.findall(str(row.get("otherMails") or "")):
+        if "#EXT#" not in match.upper():
+            return match.lower()
+    for match in EMAIL_PATTERN.findall(str(row.get("imAddresses") or "")):
+        if "#EXT#" not in match.upper():
+            return match.lower()
+    return None
+
+
+def _is_student_directory_row(row: dict[str, str]) -> bool:
+    if str(row.get("jobTitle") or "").strip().casefold() == "student":
+        return True
+    dn = str(row.get("onPremisesDistinguishedName") or "")
+    return "OU=Applicants," in dn
+
+
+def _instructor_row_priority(row: dict[str, str]) -> int:
+    upn = str(row.get("userPrincipalName") or "")
+    if "#EXT#" in upn.upper():
+        return 100
+    if str(row.get("userType") or "").strip() == "Guest":
+        return 50
+    dn = str(row.get("onPremisesDistinguishedName") or "")
+    if "OU=VizitingStaff," in dn:
+        return 0
+    if "@innopolis." in upn.lower():
+        return 5
+    return 10
+
+
+def _has_cyrillic(text: str) -> bool:
+    return any("\u0400" <= char <= "\u04FF" for char in text)
+
+
+_GIVEN_NAME_VARIANTS: dict[str, set[str]] = {
+    "andrei": {"andrei", "andrey"},
+    "andrey": {"andrei", "andrey"},
+    "alexandr": {"alexandr", "alexander"},
+    "alexander": {"alexandr", "alexander"},
+}
+
+
+def _given_names_compatible(left: str, right: str) -> bool:
+    left_key = left.casefold()
+    right_key = right.casefold()
+    if left_key == right_key:
+        return True
+    left_variants = _GIVEN_NAME_VARIANTS.get(left_key, {left_key})
+    return right_key in left_variants
+
+
+def _en_name_lookup_keys(name: str) -> list[str]:
+    cleaned = " ".join(name.split())
+    if not cleaned:
+        return []
+    keys = {normalize_person_name(cleaned)}
+    parts = cleaned.split()
+    if len(parts) >= 2:
+        keys.add(normalize_person_name(f"{parts[1]} {parts[0]}"))
+        given = parts[0]
+        family = " ".join(parts[1:])
+        for variant in _GIVEN_NAME_VARIANTS.get(given.casefold(), {given}):
+            keys.add(normalize_person_name(f"{variant} {family}"))
+    return list(keys)
+
+
+def _ru_name_lookup_keys(name: str) -> list[str]:
+    cleaned = " ".join(name.split())
+    if not cleaned:
+        return []
+    parts = cleaned.split()
+    keys = {normalize_person_name(cleaned)}
+    if len(parts) >= 2:
+        keys.add(normalize_person_name(f"{parts[1]} {parts[0]}"))
+    return list(keys)
+
+
+def _split_display_name(display_name: str) -> tuple[str | None, str | None]:
+    cleaned = display_name.strip()
+    if not cleaned:
+        return None, None
+    if _has_cyrillic(cleaned):
+        return None, cleaned
+    return cleaned, None
+
+
+@dataclass
+class ExportEntry:
+    email: str
+    name_en: str | None = None
+    name_ru: str | None = None
+
+
+def _load_export_users_directory(
+    csv_path: Path,
+) -> tuple[dict[str, ExportEntry], dict[str, ExportEntry], dict[str, ExportEntry]]:
+    best_by_en: dict[str, tuple[ExportEntry, int]] = {}
+    best_by_ru: dict[str, tuple[ExportEntry, int]] = {}
+    by_email: dict[str, ExportEntry] = {}
+    with csv_path.open(encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            if _is_student_directory_row(row):
+                continue
+            display_name = str(row.get("displayName") or "").strip()
+            email = _row_primary_email(row)
+            if not display_name or not email:
+                continue
+            name_en, name_ru = _split_display_name(display_name)
+            entry = ExportEntry(email=email, name_en=name_en, name_ru=name_ru)
+            by_email[email] = entry
+            priority = _instructor_row_priority(row)
+            for key in _en_name_lookup_keys(name_en or display_name):
+                current = best_by_en.get(key)
+                if current is None or priority < current[1]:
+                    best_by_en[key] = (entry, priority)
+            if name_ru:
+                for key in _ru_name_lookup_keys(name_ru):
+                    current = best_by_ru.get(key)
+                    if current is None or priority < current[1]:
+                        best_by_ru[key] = (entry, priority)
+    return (
+        {key: entry for key, (entry, _) in best_by_en.items()},
+        {key: entry for key, (entry, _) in best_by_ru.items()},
+        by_email,
+    )
+
+
+@dataclass
+class PeopleEntry:
+    name_en: str
+    name_ru: str | None = None
+    email: str | None = None
+    alias: str | None = None
+    position: str | None = None
+
+
+@dataclass
+class InstructorProfile:
+    id: str
+    name_en: str | None = None
+    name_ru: str | None = None
+    email: str | None = None
+    alias: str | None = None
+    position: str | None = None
+
+    def preferred_name(self) -> str:
+        return self.name_en or self.name_ru or self.id
+
+    def merge(self, other: InstructorProfile) -> None:
+        if other.email:
+            self.email = other.email
+            self.id = other.email
+        if other.name_en and not self.name_en:
+            self.name_en = other.name_en
+        if other.name_ru:
+            candidate_ru = other.name_ru
+            if not self.name_ru or len(candidate_ru.split()) > len(self.name_ru.split()):
+                self.name_ru = candidate_ru
+        if other.alias and not self.alias:
+            self.alias = other.alias
+        if other.position and not self.position:
+            self.position = other.position
+        if not self.email:
+            self.id = self.name_en or self.name_ru or self.id
+
+    def to_config_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"id": self.id}
+        if self.name_en:
+            payload["name_en"] = self.name_en
+        if self.name_ru:
+            payload["name_ru"] = self.name_ru
+        if self.email:
+            payload["email"] = self.email
+        if self.alias:
+            payload["alias"] = self.alias
+        if self.position:
+            payload["position"] = self.position
+        return payload
+
+
+def _people_csv_column_indices(header: list[str]) -> dict[str, int]:
+    shtat_idx = next((idx for idx, cell in enumerate(header) if cell.strip().startswith("ШТАТ")), 1)
+    name_en_idx = max(0, shtat_idx - 1)
+    return {
+        "name_en": name_en_idx,
+        "name_ru": shtat_idx,
+        "email": header.index("Email"),
+        "position": header.index("Position") if "Position" in header else -1,
+        "alias": header.index("Alias") if "Alias" in header else -1,
+        "student": header.index("Student?") if "Student?" in header else 4,
+    }
+
+
+def _is_people_data_row(row: list[str], columns: dict[str, int]) -> bool:
+    name_en_idx = columns["name_en"]
+    if len(row) <= name_en_idx:
+        return False
+    name_en = str(row[name_en_idx] or "").strip()
+    if not name_en or "@" in name_en:
+        return False
+    lowered = name_en.casefold()
+    if lowered in {"hrs", "total", "t1", "t2", "t3"}:
+        return False
+    return True
+
+
+class PeopleCatalog:
+    def __init__(self) -> None:
+        self._by_name: dict[str, PeopleEntry] = {}
+        self._by_email: dict[str, PeopleEntry] = {}
+        self._by_alias: dict[str, PeopleEntry] = {}
+
+    def _register(self, entry: PeopleEntry) -> None:
+        for key in _en_name_lookup_keys(entry.name_en):
+            self._by_name[key] = entry
+        if entry.name_ru:
+            for key in _ru_name_lookup_keys(entry.name_ru):
+                self._by_name[key] = entry
+        if entry.email:
+            self._by_email[entry.email.lower()] = entry
+        if entry.alias:
+            self._by_alias[entry.alias.lstrip("@").casefold()] = entry
+
+    def load_from_csv(self, csv_path: Path) -> None:
+        if not csv_path.exists():
+            return
+        with csv_path.open(encoding="utf-8", newline="") as handle:
+            rows = list(csv.reader(handle))
+        header_idx = next((idx for idx, row in enumerate(rows) if "Email" in row), None)
+        if header_idx is None:
+            return
+        header = rows[header_idx]
+        columns = _people_csv_column_indices(header)
+        email_idx = columns["email"]
+        position_idx = columns["position"]
+        alias_idx = columns["alias"]
+        student_idx = columns["student"]
+        name_en_idx = columns["name_en"]
+        name_ru_idx = columns["name_ru"]
+        for row in rows[header_idx + 1 :]:
+            if not _is_people_data_row(row, columns):
+                continue
+            if len(row) <= max(email_idx, student_idx, name_ru_idx):
+                continue
+            if str(row[student_idx] if student_idx < len(row) else "").strip().casefold() == "yes":
+                continue
+            name_en = str(row[name_en_idx] or "").strip()
+            name_ru_raw = str(row[name_ru_idx] or "").strip()
+            name_ru = name_ru_raw or None
+            email_raw = str(row[email_idx] or "").strip().lower()
+            email = email_raw if "@" in email_raw and "#EXT#" not in email_raw.upper() else None
+            alias_raw = (
+                str(row[alias_idx] or "").strip() if alias_idx >= 0 and alias_idx < len(row) else ""
+            )
+            alias = alias_raw if alias_raw else None
+            position_raw = (
+                str(row[position_idx] or "").strip() if position_idx >= 0 and position_idx < len(row) else ""
+            )
+            position = position_raw if position_raw else None
+            self._register(
+                PeopleEntry(
+                    name_en=name_en,
+                    name_ru=name_ru or None,
+                    email=email,
+                    alias=alias,
+                    position=position,
+                )
+            )
+
+    def find(self, token: str) -> PeopleEntry | None:
+        cleaned = " ".join(token.split())
+        if not cleaned:
+            return None
+        if "@" in cleaned:
+            by_email = self._by_email.get(cleaned.lower())
+            if by_email:
+                return by_email
+        for key in _en_name_lookup_keys(cleaned):
+            by_name = self._by_name.get(key)
+            if by_name:
+                return by_name
+        if _has_cyrillic(cleaned):
+            for key in _ru_name_lookup_keys(cleaned):
+                by_name = self._by_name.get(key)
+                if by_name:
+                    return by_name
+        return self._by_alias.get(cleaned.lstrip("@").casefold())
+
+    def iter_with_email(self) -> list[PeopleEntry]:
+        return list(self._by_email.values())
+
+
+@dataclass
+class InstructorLookup:
+    export_by_en: dict[str, ExportEntry]
+    export_by_ru: dict[str, ExportEntry]
+    export_by_email: dict[str, ExportEntry]
+    people: PeopleCatalog
+
+
+def _is_export_users_csv(csv_path: Path) -> bool:
+    if not csv_path.exists():
+        return False
+    with csv_path.open(encoding="utf-8", newline="") as handle:
+        header_line = handle.readline()
+    return "displayName" in header_line and "userPrincipalName" in header_line
+
+
+def resolve_users_csv_paths(explicit: Path | None, *search_dirs: Path) -> list[Path]:
+    dirs = [directory for directory in search_dirs if directory]
+    if explicit is not None:
+        if explicit.is_absolute() and explicit.exists():
+            return [explicit]
+        for directory in dirs:
+            candidate = directory / explicit
+            if candidate.exists():
+                return [candidate]
+        return [explicit]
+    found: list[Path] = []
+    for name in USERS_CSV_DEFAULT_NAMES:
+        for directory in dirs:
+            candidate = directory / name
+            if candidate.exists() and candidate not in found:
+                found.append(candidate)
+    return found
+
+
+def load_instructor_lookup(csv_paths: list[Path]) -> InstructorLookup:
+    export_by_en: dict[str, ExportEntry] = {}
+    export_by_ru: dict[str, ExportEntry] = {}
+    export_by_email: dict[str, ExportEntry] = {}
+    people = PeopleCatalog()
+    for csv_path in csv_paths:
+        if not csv_path.exists():
+            continue
+        if _is_export_users_csv(csv_path):
+            by_en, by_ru, by_email = _load_export_users_directory(csv_path)
+            export_by_en.update(by_en)
+            export_by_ru.update(by_ru)
+            export_by_email.update(by_email)
+        else:
+            people.load_from_csv(csv_path)
+    return InstructorLookup(
+        export_by_en=export_by_en,
+        export_by_ru=export_by_ru,
+        export_by_email=export_by_email,
+        people=people,
+    )
+
+
+def _find_export_entry(token: str, lookup: InstructorLookup) -> ExportEntry | None:
+    cleaned = " ".join(token.split())
+    if not cleaned:
+        return None
+    if "@" in cleaned:
+        return lookup.export_by_email.get(cleaned.lower())
+    for key in _en_name_lookup_keys(cleaned):
+        hit = lookup.export_by_en.get(key)
+        if hit:
+            return hit
+    if _has_cyrillic(cleaned):
+        for key in _ru_name_lookup_keys(cleaned):
+            hit = lookup.export_by_ru.get(key)
+            if hit:
+                return hit
+    return None
+
+
+def _apply_export_to_profile(profile: InstructorProfile, export: ExportEntry) -> None:
+    profile.email = export.email
+    profile.id = export.email
+    if export.name_en and not profile.name_en:
+        profile.name_en = export.name_en
+    if export.name_ru and not profile.name_ru:
+        profile.name_ru = export.name_ru
+
+
+def _apply_people_to_profile(profile: InstructorProfile, people: PeopleEntry) -> None:
+    if not profile.name_en:
+        profile.name_en = people.name_en
+    if people.name_ru:
+        candidate_ru = people.name_ru
+        if not profile.name_ru or len(candidate_ru.split()) > len(profile.name_ru.split()):
+            profile.name_ru = candidate_ru
+    if people.email:
+        profile.email = people.email
+        profile.id = people.email
+    if people.alias and not profile.alias:
+        profile.alias = people.alias
+    if people.position and not profile.position:
+        profile.position = people.position
+
+
+def _profile_label_tokens(profile: InstructorProfile) -> set[str]:
+    tokens: set[str] = set()
+    for value in (profile.name_en, profile.name_ru, profile.email, profile.alias):
+        if not value:
+            continue
+        tokens.add(normalize_person_name(value))
+        if "@" in value:
+            tokens.add(value.lower())
+            tokens.add(value.lstrip("@").casefold())
+    return tokens
+
+
+def _names_refer_to_same_person(left: InstructorProfile, right: InstructorProfile) -> bool:
+    if left.email and right.email:
+        return left.email == right.email
+
+    for left_name in (left.name_en, left.name_ru):
+        if not left_name:
+            continue
+        for right_name in (right.name_en, right.name_ru):
+            if not right_name:
+                continue
+            if normalize_person_name(left_name) == normalize_person_name(right_name):
+                return True
+            if _has_cyrillic(left_name) or _has_cyrillic(right_name):
+                left_keys = set(_ru_name_lookup_keys(left_name))
+                right_keys = set(_ru_name_lookup_keys(right_name))
+                if left_keys & right_keys:
+                    return True
+                continue
+            left_parts = left_name.split()
+            right_parts = right_name.split()
+            if len(left_parts) >= 2 and len(right_parts) >= 2:
+                if left_parts[-1].casefold() == right_parts[-1].casefold() and _given_names_compatible(
+                    left_parts[0], right_parts[0]
+                ):
+                    return True
+    return False
+
+
+def profiles_should_merge(left: InstructorProfile, right: InstructorProfile) -> bool:
+    if _names_refer_to_same_person(left, right):
+        return True
+    left_tokens = _profile_label_tokens(left)
+    right_tokens = _profile_label_tokens(right)
+    return bool(left_tokens & right_tokens)
+
+
+def resolve_instructor_profile(token: str, lookup: InstructorLookup) -> InstructorProfile:
+    display_name = " ".join(token.split())
+    name_en, name_ru = _split_display_name(display_name)
+    profile = InstructorProfile(
+        id=display_name,
+        name_en=name_en or (display_name if not name_ru else None),
+        name_ru=name_ru,
+    )
+
+    people = lookup.people.find(display_name)
+    export = _find_export_entry(display_name, lookup)
+    if people and not export and people.name_ru:
+        for key in _ru_name_lookup_keys(people.name_ru):
+            export = lookup.export_by_ru.get(key)
+            if export:
+                break
+
+    if export:
+        _apply_export_to_profile(profile, export)
+    if people:
+        _apply_people_to_profile(profile, people)
+    if not profile.email:
+        profile.id = profile.name_en or profile.name_ru or display_name
+    return profile
+
+
+def register_instructor(
+    name: str,
+    instructors_map: dict[str, InstructorProfile],
+    lookup: InstructorLookup,
+) -> str:
+    profile = resolve_instructor_profile(name, lookup)
+    canonical_id = profile.id
+
+    for existing_id in list(instructors_map):
+        if existing_id == canonical_id:
+            continue
+        if profiles_should_merge(instructors_map[existing_id], profile):
+            profile.merge(instructors_map[existing_id])
+            del instructors_map[existing_id]
+
+    existing = instructors_map.get(canonical_id)
+    if existing:
+        existing.merge(profile)
+        profile = existing
+    instructors_map[canonical_id] = profile
+    return canonical_id
+
+
+def seed_instructors_from_people_roster(
+    instructors_map: dict[str, InstructorProfile],
+    lookup: InstructorLookup,
+) -> None:
+    for entry in lookup.people.iter_with_email():
+        token = entry.name_en or entry.email or ""
+        if token:
+            register_instructor(token, instructors_map, lookup)
+
+
+def _teacher_signature(
+    teacher_names: list[str],
+    instructors_map: dict[str, InstructorProfile],
+    lookup: InstructorLookup,
+) -> tuple[str, ...]:
+    return tuple(
+        sorted(register_instructor(name, instructors_map, lookup) for name in teacher_names)
+    )
+
+
+def _instructor_pattern_value(instructor_ids: tuple[str, ...]) -> str | list[str] | None:
+    if not instructor_ids:
+        return None
+    if len(instructor_ids) == 1:
+        return instructor_ids[0]
+    return list(instructor_ids)
+
+
+def _nest_modifier_entries(modifiers: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not modifiers:
+        return []
+    nest = modifiers.get("NEST")
+    if not nest:
+        return []
+    return [entry for entry in nest if isinstance(entry, dict)]
+
+
+def _top_level_on_dates(modifiers: dict[str, Any] | None) -> list[str]:
+    if not modifiers:
+        return []
+    on = modifiers.get("on")
+    if not on:
+        return []
+    return [str(value) for value in on]
+
+
+def _is_occurrence_only_modifier(modifiers: dict[str, Any] | None) -> bool:
+    return bool(_top_level_on_dates(modifiers)) and not _nest_modifier_entries(modifiers)
+
+
+def _is_weekly_with_nest_modifier(modifiers: dict[str, Any] | None) -> bool:
+    return bool(_nest_modifier_entries(modifiers))
+
+
+def _core_occurrence_from_row(
+    row: dict[str, Any],
+    instructor_ids: tuple[str, ...],
+    *,
+    date_value: str,
+) -> dict[str, Any]:
+    modifiers = row.get("modifiers") or {}
+    room = _normalize_room_value(row.get("room")) or str(modifiers.get("location") or "").strip()
+    entry: dict[str, Any] = {
+        "date": date_value,
+        "start_time": normalize_time(row["start_time"]),
+        "end_time": normalize_time(row["end_time"]),
+    }
+    if room:
+        entry["room"] = room
+    instructor = _instructor_pattern_value(instructor_ids)
+    if instructor is not None:
+        entry["instructor"] = instructor
+    return entry
+
+
+def _core_occurrences_from_row(row: dict[str, Any], instructor_ids: tuple[str, ...]) -> list[dict[str, Any]]:
+    on_dates = _top_level_on_dates(row.get("modifiers"))
+    return [
+        _core_occurrence_from_row(row, instructor_ids, date_value=date_value)
+        for date_value in on_dates
+    ]
+
+
+def _nest_edits_from_modifiers(modifiers: dict[str, Any] | None) -> list[dict[str, Any]]:
+    edits: list[dict[str, Any]] = []
+    for nested in _nest_modifier_entries(modifiers):
+        location = nested.get("location")
+        if not location:
+            continue
+        for date_value in nested.get("on") or []:
+            edits.append(
+                {
+                    "select_week": str(date_value),
+                    "room": str(location),
+                }
+            )
+    return edits
+
+
+def _dedupe_pattern_edits(edits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[Any, ...]] = set()
+    deduped: list[dict[str, Any]] = []
+    for edit in sorted(edits, key=lambda item: str(item.get("select_week", ""))):
+        instructor = edit.get("instructor")
+        instructor_key = tuple(instructor) if isinstance(instructor, list) else instructor
+        key = (
+            str(edit.get("select_week", "")),
+            edit.get("room"),
+            edit.get("cancel"),
+            edit.get("date"),
+            edit.get("start_time"),
+            edit.get("end_time"),
+            instructor_key,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(edit)
+    return deduped
+
+
+def _dedupe_occurrences(occurrences: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[tuple[Any, ...]] = set()
+    deduped: list[dict[str, Any]] = []
+    for occurrence in sorted(
+        occurrences,
+        key=lambda item: (str(item.get("date", "")), str(item.get("start_time", "")), str(item.get("end_time", ""))),
+    ):
+        instructor = occurrence.get("instructor")
+        instructor_key = tuple(instructor) if isinstance(instructor, list) else instructor
+        key = (
+            str(occurrence.get("date", "")),
+            str(occurrence.get("start_time", "")),
+            str(occurrence.get("end_time", "")),
+            occurrence.get("room"),
+            instructor_key,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(occurrence)
+    return deduped
+
+
+def _build_instructor_pool(
+    signatures_for_pool: list[tuple[str, ...]],
+) -> list[str] | list[str | list[str]]:
+    if not signatures_for_pool:
+        return []
+    if len(signatures_for_pool) == 1:
+        sig = signatures_for_pool[0]
+        if len(sig) == 0:
+            return []
+        if len(sig) == 1:
+            return [sig[0]]
+        return [list(sig)]
+    if all(len(sig) == 1 for sig in signatures_for_pool):
+        return sorted(sig[0] for sig in signatures_for_pool)
+    return [list(sig) for sig in signatures_for_pool]
+
+
+def _weekly_pattern_from_slots(
+    slots: set[WeeklySlotSig],
+    edits_by_slot: dict[WeeklySlotSig, list[dict[str, Any]]] | None = None,
+) -> list[dict[str, Any]]:
+    order = {name: index for index, name in enumerate(DATE_WEEKDAY_NAMES)}
+    pattern: list[dict[str, Any]] = []
+    for weekday, start_time, end_time, room, instructor_ids in sorted(
+        slots, key=lambda item: (order.get(item[0], 99), item[1], item[2], item[3], item[4])
+    ):
+        entry: dict[str, Any] = {
+            "weekday": weekday,
+            "start_time": normalize_time(start_time),
+            "end_time": normalize_time(end_time),
+        }
+        if room:
+            entry["room"] = room
+        instructor = _instructor_pattern_value(instructor_ids)
+        if instructor is not None:
+            entry["instructor"] = instructor
+        slot_edits = _dedupe_pattern_edits((edits_by_slot or {}).get((weekday, start_time, end_time, room, instructor_ids), []))
+        if slot_edits:
+            entry["edits"] = slot_edits
+        pattern.append(entry)
+    return pattern
+
+
+def _occurrences_for_variant(
+    signatures_for_pool: list[tuple[str, ...]],
+    groups_for_cls: list[str],
+    occurrences_by_signature: dict[tuple[str, ...], dict[str, list[dict[str, Any]]]],
+) -> list[dict[str, Any]]:
+    collected: list[dict[str, Any]] = []
+    for signature in signatures_for_pool:
+        by_group = occurrences_by_signature.get(signature, {})
+        for group_id in groups_for_cls:
+            collected.extend(by_group.get(group_id, []))
+    return _dedupe_occurrences(collected)
+
+
+def _core_sessions_from_slots(
+    groups_for_cls: list[str],
+    slots_source: dict[str, set[WeeklySlotSig]],
+    student_groups: list[str],
+    *,
+    per_group: bool,
+    occurrences_by_signature: dict[tuple[str, ...], dict[str, list[dict[str, Any]]]] | None = None,
+    signatures_for_pool: list[tuple[str, ...]] | None = None,
+    edits_by_slot: dict[WeeklySlotSig, list[dict[str, Any]]] | None = None,
+) -> list[dict[str, Any]]:
+    signatures = signatures_for_pool or [()]
+    if per_group:
+        result: list[dict[str, Any]] = []
+        for group_id in sorted(groups_for_cls):
+            slots = slots_source.get(group_id, set())
+            occurrences = _occurrences_for_variant(signatures, [group_id], occurrences_by_signature or {})
+            if slots:
+                result.append(
+                    {
+                        "audience": [group_id],
+                        "weekly_pattern": _weekly_pattern_from_slots(slots, edits_by_slot),
+                    }
+                )
+            if occurrences:
+                result.append(
+                    {
+                        "audience": [group_id],
+                        "occurrences": occurrences,
+                    }
+                )
+        return result
+
+    all_slots: set[WeeklySlotSig] = set()
+    for group_id in groups_for_cls:
+        all_slots.update(slots_source.get(group_id, set()))
+    occurrences = _occurrences_for_variant(signatures, groups_for_cls, occurrences_by_signature or {})
+    if not all_slots and not occurrences:
+        return []
+
+    result = []
+    if all_slots:
+        result.append(
+            {
+                "audience": list(student_groups),
+                "weekly_pattern": _weekly_pattern_from_slots(all_slots, edits_by_slot),
+            }
+        )
+    if occurrences:
+        result.append(
+            {
+                "audience": list(student_groups),
+                "occurrences": occurrences,
+            }
+        )
+    return result
 
 
 def maybe_online(room: str | None) -> bool:
@@ -456,32 +1258,54 @@ def should_exclude_lesson(lesson_name: str) -> bool:
     }
 
 
-def normalize_weekday_label(value: str) -> str:
+_ENGLISH_DISTRIBUTION_WEEKDAY_ALIASES: dict[str, Weekday] = {
+    "M": Weekday.MONDAY,
+    "T": Weekday.TUESDAY,
+    "W": Weekday.WEDNESDAY,
+    "TH": Weekday.THURSDAY,
+    "F": Weekday.FRIDAY,
+    "S": Weekday.SATURDAY,
+}
+
+
+def canonical_weekday_label(value: str) -> str:
     token = value.strip().upper()
-    mapping = {
-        "M": "Mon",
-        "T": "Tue",
-        "W": "Wed",
-        "TH": "Thu",
-        "F": "Fri",
-        "S": "Sat",
-    }
-    return mapping.get(token, token.title())
+    alias = _ENGLISH_DISTRIBUTION_WEEKDAY_ALIASES.get(token)
+    if alias is not None:
+        return alias.value
+    return Weekday(token).value
 
 
 class FlowStyleList(list):
     pass
 
 
-class ConfigDumper(yaml.SafeDumper):
+class _YamlDumper(yaml.SafeDumper):
     pass
+
+
+def _yaml_str_presenter(dumper: yaml.SafeDumper, data: str) -> yaml.nodes.ScalarNode:
+    if "\n" in data:
+        return dumper.represent_scalar("tag:yaml.org,2002:str", data, style="|")
+    return dumper.represent_scalar("tag:yaml.org,2002:str", data)
 
 
 def _represent_flow_list(dumper: yaml.SafeDumper, data: FlowStyleList) -> yaml.nodes.SequenceNode:
     return dumper.represent_sequence("tag:yaml.org,2002:seq", data, flow_style=True)
 
 
-ConfigDumper.add_representer(FlowStyleList, _represent_flow_list)
+_YamlDumper.add_representer(str, _yaml_str_presenter)
+_YamlDumper.add_representer(FlowStyleList, _represent_flow_list)
+
+
+def dump_config_yaml(config: dict[str, Any]) -> str:
+    return yaml.dump(
+        config,
+        Dumper=_YamlDumper,
+        sort_keys=False,
+        allow_unicode=True,
+        width=10_000,
+    )
 
 
 def apply_yaml_style_overrides(node: Any) -> Any:
@@ -623,12 +1447,11 @@ def load_english_distribution(
             continue
         gid = group_id_from_english_label(label)
         instr_name = row[col["instructor"]].strip() or "Unknown Instructor"
-        instr_id = to_instructor_id(instr_name)
-        group_instructors[gid].add(instr_id)
+        group_instructors[gid].add(instr_name)
         time_hhmm = excel_time_to_hhmm(row[col["time"]])
         days_raw = row[col["days"]].strip()
         day_tokens = [d for d in (part.strip() for part in days_raw.split("/")) if d]
-        day_names = [normalize_weekday_label(d) for d in day_tokens]
+        day_names = [canonical_weekday_label(d) for d in day_tokens]
         email = row[col["e-mail"]].strip().lower()
         if "@" not in email:
             email = ""
@@ -647,7 +1470,7 @@ def load_english_distribution(
             group["students"].append(email)
 
         for day in day_names:
-            by_slot_and_instr[(day, time_hhmm, instr_id)].add(gid)
+            by_slot_and_instr[(day, time_hhmm, instr_name)].add(gid)
             by_slot_only[(day, time_hhmm)].add(gid)
             group_slots[gid].add((day, time_hhmm))
 
@@ -729,6 +1552,27 @@ def build_group_order(programs: dict[str, list[dict[str, Any]]]) -> dict[str, in
     return order
 
 
+def build_group_order_from_sections(sections: list[dict[str, Any]]) -> dict[str, int]:
+    order: dict[str, int] = {}
+    idx = 0
+
+    def register_group(group: Any) -> None:
+        nonlocal idx
+        gid = group if isinstance(group, str) else _group_entry_code(group)
+        if gid and gid not in order:
+            order[gid] = idx
+            idx += 1
+
+    for section in sections:
+        for program in section.get("programs", []):
+            for group in program.get("groups", []):
+                register_group(group)
+            for track in program.get("tracks", []):
+                for group in track.get("groups", []):
+                    register_group(group)
+    return order
+
+
 def collect_academic_groups(programs: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -799,21 +1643,12 @@ def enrich_academic_groups_from_predefined(
             continue
         if gid.lower() in IGNORED_ELECTIVE_GROUP_IDS:
             continue
-        alias = str(item.get("event_group_alias") or "").strip().lower()
         students_raw = item.get("user_emails")
         students = []
         if isinstance(students_raw, list):
             students = [str(email).strip().lower() for email in students_raw if str(email).strip()]
 
         if gid not in by_id:
-            if alias.startswith(ELECTIVE_ALIAS_PREFIXES):
-                by_id[gid] = {
-                    "code": gid,
-                    "name": gid,
-                    "students": students,
-                    "estimated_size": len(students) if students else None,
-                }
-                ordered_ids.append(gid)
             continue
 
         existing = by_id[gid]
@@ -932,7 +1767,7 @@ def build_sections(
                 "programs": [
                     {
                         "code": "ENGLISH_YEAR1",
-                        "name": "English",
+                        "name": "English for BS - Year 1",
                         "kind": "english_program",
                         "applies_to": ["BS_Y1_EN", "BS_Y1_RU"],
                         "tracks": english_tracks,
@@ -1022,7 +1857,7 @@ def attach_english_to_programs(
         enriched["english"] = [
             {
                 "code": "ENGLISH_YEAR1",
-                "name": "English",
+                "name": "English for BS - Year 1",
                 "language": "en",
                 "tracks": tracks,
             }
@@ -1148,13 +1983,28 @@ def class_group_rank(
     return min((token_rank(token) for token in groups), default=10**9)
 
 
+def course_group_rank(
+    course: dict[str, Any],
+    selector_map: dict[str, set[str]],
+    group_order: dict[str, int],
+) -> int:
+    ranks = [
+        class_group_rank(component, selector_map, group_order)
+        for component in course.get("components", [])
+    ]
+    return min(ranks) if ranks else 10**9
+
+
 def infer_per_group(
     class_tag: str,
     student_groups: list[str],
     *,
     is_english_course: bool,
     source_group_count: int | None = None,
+    is_shared_lesson: bool = False,
 ) -> bool:
+    if is_shared_lesson:
+        return False
     if is_english_course and class_tag == "class":
         return True
     effective_group_count = source_group_count if source_group_count is not None else len(student_groups)
@@ -1163,6 +2013,475 @@ def infer_per_group(
     if class_tag == "lab":
         return True
     return False
+
+
+def _weekday_name_from_date(value: date) -> str:
+    return DATE_WEEKDAY_NAMES[value.weekday()]
+
+
+def _is_parallel_stream_group_token(token: str) -> bool:
+    value = token.strip().upper()
+    return len(value) == 2 and value[0] == "G" and value[1].isdigit()
+
+
+def _elective_parallel_stream_group(lesson: dict[str, Any]) -> str:
+    audience = _row_audience(lesson)
+    if not audience:
+        return ""
+    token = audience[0].strip().upper()
+    if _is_parallel_stream_group_token(token):
+        return token
+    return ""
+
+
+def _slug_alias_token(alias: str) -> str:
+    ascii_slug = _slug_code(alias)
+    if ascii_slug and ascii_slug != "item":
+        return ascii_slug.upper()
+    token = re.sub(r"[^\w]+", "_", alias, flags=re.UNICODE).strip("_")
+    return token.upper() if token else "UNK"
+
+
+def _elective_alias_token_for_lessons(lessons: list[dict[str, Any]]) -> str:
+    alias_tokens: set[str] = set()
+    for lesson in lessons:
+        for token in _row_audience(lesson):
+            if not _is_parallel_stream_group_token(token):
+                alias_tokens.add(token)
+    if alias_tokens:
+        return _slug_alias_token(sorted(alias_tokens)[0])
+    if lessons:
+        return _slug_alias_token(_elective_subject(lessons[0]))
+    return "UNK"
+
+
+def _elective_alias_token(lesson: dict[str, Any]) -> str:
+    return _elective_alias_token_for_lessons([lesson])
+
+
+def elective_student_group_id(alias: str, parallel: str = "") -> str:
+    parts = [SUMMER_ELECTIVE_TERM_PREFIX, alias]
+    if parallel:
+        parts.append(parallel)
+    return "-".join(parts)
+
+
+def _elective_parallel_groups_for_lessons(lessons: list[dict[str, Any]]) -> list[str]:
+    parallels = {_elective_parallel_stream_group(lesson) for lesson in lessons}
+    parallels.discard("")
+    return sorted(parallels)
+
+
+def _elective_component_tag(lesson: dict[str, Any], *, shared_for_parallel_groups: bool) -> str:
+    explicit = lesson.get("type")
+    if explicit:
+        return normalize_class_tag(str(explicit))
+    if shared_for_parallel_groups:
+        return "lec"
+    return "class"
+
+
+def _elective_sessions_from_lessons(
+    lessons: list[dict[str, Any]],
+    audience: list[str],
+    instructors_map: dict[str, InstructorProfile],
+    lookup: InstructorLookup,
+) -> list[dict[str, Any]]:
+    entries_by_key: dict[tuple[str, str, str, str | None, str | None], tuple[dict[str, Any], tuple[str, ...]]] = {}
+    for lesson in lessons:
+        teacher_ids = tuple(_register_elective_instructors(lesson, instructors_map, lookup))
+        for occurrence in lesson.get("occurrences") or []:
+            occ_date = occurrence.get("date")
+            if not occ_date:
+                continue
+            key = (
+                str(occ_date),
+                str(occurrence.get("start_time") or ""),
+                str(occurrence.get("end_time") or ""),
+                occurrence.get("room"),
+                occurrence.get("a1_range"),
+            )
+            if key not in entries_by_key:
+                entries_by_key[key] = (occurrence, teacher_ids)
+
+    sorted_entries = sorted(
+        entries_by_key.values(),
+        key=lambda item: (str(item[0].get("date")), str(item[0].get("start_time"))),
+    )
+    if not sorted_entries:
+        return []
+
+    occurrences: list[dict[str, Any]] = []
+    for occurrence, teacher_ids in sorted_entries:
+        entry: dict[str, Any] = {
+            "date": str(occurrence["date"]),
+            "start_time": str(occurrence.get("start_time") or "00:00"),
+            "end_time": str(occurrence.get("end_time") or occurrence.get("start_time") or "00:00"),
+        }
+        room = occurrence.get("room")
+        if room is not None and str(room).strip():
+            entry["room"] = str(room).strip()
+        if len(teacher_ids) == 1:
+            entry["instructor"] = teacher_ids[0]
+        elif len(teacher_ids) > 1:
+            entry["instructor"] = list(teacher_ids)
+        occurrences.append(entry)
+
+    return [
+        {
+            "audience": list(audience),
+            "occurrences": occurrences,
+        }
+    ]
+
+
+def _elective_component_from_lessons(
+    lessons: list[dict[str, Any]],
+    student_groups: list[str],
+    instructors_map: dict[str, InstructorProfile],
+    lookup: InstructorLookup,
+    *,
+    shared_for_parallel_groups: bool,
+) -> dict[str, Any] | None:
+    if not lessons or not student_groups:
+        return None
+    duration_slots = max(_elective_duration_slots(lesson) for lesson in lessons)
+    teacher_signatures = [
+        tuple(_register_elective_instructors(lesson, instructors_map, lookup)) for lesson in lessons
+    ]
+    representative = lessons[0]
+    sessions = _elective_sessions_from_lessons(lessons, student_groups, instructors_map, lookup)
+    meeting_count = len(sessions[0]["occurrences"]) if sessions else 0
+    cls: dict[str, Any] = {
+        "tag": _elective_component_tag(representative, shared_for_parallel_groups=shared_for_parallel_groups),
+        "student_groups": student_groups,
+        "per_semester": meeting_count or max(len(lesson.get("occurrences") or []) for lesson in lessons),
+        "instructor_pool": _elective_instructor_pool(teacher_signatures),
+        "sessions": sessions,
+    }
+    if duration_slots != 1:
+        cls["duration_slots"] = duration_slots
+    return cls
+
+
+def _group_elective_lessons_by_course(
+    grouped_electives: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    by_course: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for lesson in grouped_electives:
+        course_name = normalize_lesson_name(_elective_subject(lesson))
+        if not course_name or should_exclude_lesson(course_name):
+            continue
+        if not lesson.get("occurrences"):
+            continue
+        by_course[course_name].append(lesson)
+    return by_course
+
+
+def collect_elective_student_groups(grouped_electives: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_id: dict[str, dict[str, Any]] = {}
+    for lessons in _group_elective_lessons_by_course(grouped_electives).values():
+        alias = _elective_alias_token_for_lessons(lessons)
+        parallels = _elective_parallel_groups_for_lessons(lessons)
+        title = _elective_subject(lessons[0])
+        if parallels:
+            for parallel in parallels:
+                group_id = elective_student_group_id(alias, parallel)
+                by_id[group_id] = {
+                    "code": group_id,
+                    "name": f"{title} · {parallel}",
+                    "kind": "elective",
+                    "estimated_size": None,
+                    "students": [],
+                }
+            continue
+
+        group_id = elective_student_group_id(alias)
+        students_number = lessons[0].get("students_number")
+        estimated_size = int(students_number) if students_number is not None else None
+        by_id[group_id] = {
+            "code": group_id,
+            "name": title,
+            "kind": "elective",
+            "estimated_size": estimated_size,
+            "students": [],
+        }
+    return [by_id[group_id] for group_id in sorted(by_id)]
+
+
+def append_summer_electives_to_sections(
+    sections: list[dict[str, Any]],
+    elective_group_ids: list[str],
+) -> list[dict[str, Any]]:
+    if not elective_group_ids:
+        return sections
+    updated = deepcopy(sections)
+    electives_section: dict[str, Any] | None = None
+    for section in updated:
+        if section.get("code") == "electives":
+            electives_section = section
+            break
+    if electives_section is None:
+        electives_section = {
+            "code": "electives",
+            "name": "Элективы",
+            "kind": "electives",
+            "programs": [],
+        }
+        updated.append(electives_section)
+    programs = list(electives_section.get("programs") or [])
+    programs.append(
+        {
+            "code": "SUM26",
+            "name": "Summer 2026",
+            "kind": "elective_bucket",
+            "groups": sorted(elective_group_ids),
+        }
+    )
+    electives_section["programs"] = programs
+    return updated
+
+
+def _pattern_key_from_row(row: dict[str, Any]) -> PatternKey:
+    class_tag = normalize_class_tag(row["lesson_class_type"])
+    room = str(row.get("room") or "")
+    # Per-group labs use different rooms/times per audience; room belongs on each
+    # session slot, not in the aggregation key (otherwise one component per room).
+    if class_tag == "lab":
+        room = ""
+    return PatternKey(
+        course=normalize_lesson_name(row["lesson_name"]),
+        class_tag=class_tag,
+        room=str(room or ""),
+        start_date="",
+        end_date="",
+        stream_group="",
+        sheet_scope="",
+    )
+
+
+def resolve_data_path(path: Path, *search_dirs: Path) -> Path:
+    if path.is_absolute() and path.exists():
+        return path
+    if path.exists():
+        return path.resolve()
+    for directory in search_dirs:
+        candidate = directory / path
+        if candidate.exists():
+            return candidate.resolve()
+    return path
+
+
+def _load_yaml_list(path: Path, label: str) -> list[dict[str, Any]]:
+    if not path.exists():
+        raise FileNotFoundError(f"{label} not found: {path}")
+    if path.suffix.lower() not in {".yaml", ".yml"}:
+        raise ValueError(f"{label} must be a YAML file: {path}")
+    payload = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, list):
+        raise ValueError(f"{label} must be a YAML list: {path}")
+    return payload
+
+
+def load_grouped_elective_lessons(path: Path) -> list[dict[str, Any]]:
+    payload = _load_yaml_list(path, "Electives lessons")
+    for index, item in enumerate(payload):
+        if not isinstance(item, dict):
+            raise ValueError(f"Electives lessons entry {index} must be an object")
+        for key in ("subject", "audience", "occurrences", "spreadsheet_id", "google_sheet_gid", "google_sheet_name"):
+            if key not in item:
+                raise ValueError(f"Electives lessons entry {index} missing required field: {key}")
+    return payload
+
+
+def resolve_lessons_search_dirs(input_path: Path) -> tuple[Path, ...]:
+    dirs: list[Path] = []
+    for directory in (input_path.parent, Path.cwd(), SCRIPT_DIR):
+        resolved = directory.resolve()
+        if resolved not in dirs:
+            dirs.append(resolved)
+    return tuple(dirs)
+
+
+def _row_instructor(row: dict[str, Any]) -> str | None:
+    return row.get("instructor")
+
+
+def _row_audience(row: dict[str, Any]) -> list[str]:
+    return normalize_group_names(row["audience"])
+
+
+def _elective_subject(row: dict[str, Any]) -> str:
+    return str(row["subject"]).strip()
+
+
+def expand_grouped_core_courses_to_rows(payload: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for course in payload:
+        cohort = course.get("cohort")
+        subject = course["subject"]
+        parent_fields = {
+            "course_name": cohort,
+            "spreadsheet_id": course["spreadsheet_id"],
+            "google_sheet_gid": course["google_sheet_gid"],
+            "google_sheet_name": course["google_sheet_name"],
+            "start_date": course.get("start_date"),
+            "end_date": course.get("end_date"),
+        }
+        for component in course["components"]:
+            audience = _row_audience(component)
+            rows.append(
+                {
+                    "lesson_name": subject,
+                    "lesson_class_type": component.get("type"),
+                    "weekday": component["weekday"],
+                    "start_time": component["start_time"],
+                    "end_time": component["end_time"],
+                    "room": component.get("room"),
+                    "teacher": _row_instructor(component),
+                    "group_name": audience,
+                    "students_number": component.get("students_number"),
+                    "modifiers": component.get("modifiers"),
+                    "a1_range": component.get("a1_range"),
+                    **parent_fields,
+                }
+            )
+    return rows
+
+
+def load_core_courses_file(path: Path) -> list[dict[str, Any]]:
+    payload = _load_yaml_list(path, "Core courses lessons")
+    for index, item in enumerate(payload):
+        if not isinstance(item, dict):
+            raise ValueError(f"Core courses entry {index} must be an object")
+        for key in ("subject", "components", "spreadsheet_id", "google_sheet_gid", "google_sheet_name"):
+            if key not in item:
+                raise ValueError(f"Core courses entry {index} missing required field: {key}")
+        if not item["components"]:
+            raise ValueError(f"Core courses entry {index} has no components")
+        for comp_index, component in enumerate(item["components"]):
+            if not isinstance(component, dict):
+                raise ValueError(f"Core courses entry {index} component {comp_index} must be an object")
+            for key in ("weekday", "start_time", "end_time", "audience"):
+                if key not in component:
+                    raise ValueError(
+                        f"Core courses entry {index} component {comp_index} missing required field: {key}"
+                    )
+    return expand_grouped_core_courses_to_rows(payload)
+
+
+def _elective_occurrence_dates(lesson: dict[str, Any]) -> list[date]:
+    dates: list[date] = []
+    for occurrence in lesson.get("occurrences") or []:
+        raw = occurrence.get("date")
+        if raw:
+            dates.append(date.fromisoformat(str(raw)))
+    return dates
+
+
+def _elective_duration_slots(lesson: dict[str, Any]) -> int:
+    max_slots = 1
+    for occurrence in lesson.get("occurrences") or []:
+        start_raw = occurrence.get("start_time")
+        end_raw = occurrence.get("end_time")
+        if not start_raw or not end_raw:
+            continue
+        delta = datetime.strptime(normalize_time(str(end_raw)), "%H:%M") - datetime.strptime(
+            normalize_time(str(start_raw)), "%H:%M"
+        )
+        duration_minutes = abs(int(delta.total_seconds())) // 60
+        max_slots = max(max_slots, max(1, round(duration_minutes / 90)))
+    return max_slots
+
+
+def _register_elective_instructors(
+    lesson: dict[str, Any],
+    instructors_map: dict[str, InstructorProfile],
+    lookup: InstructorLookup,
+) -> list[str]:
+    teacher_names = split_teacher_names(_row_instructor(lesson))
+    return list(_teacher_signature(teacher_names, instructors_map, lookup))
+
+
+def _elective_instructor_pool(teacher_id_sets: list[tuple[str, ...]]) -> list[str] | list[list[str]]:
+    unique_signatures = sorted({sig for sig in teacher_id_sets if sig})
+    if not unique_signatures:
+        return []
+    if len(unique_signatures) == 1:
+        sig = unique_signatures[0]
+        if len(sig) == 1:
+            return [sig[0]]
+        return [list(sig)]
+    if all(len(sig) == 1 for sig in unique_signatures):
+        return sorted({sig[0] for sig in unique_signatures})
+    return [list(sig) for sig in unique_signatures]
+
+
+def merge_elective_courses(
+    courses_map: dict[str, list[dict[str, Any]]],
+    course_is_elective: dict[str, bool],
+    grouped_electives: list[dict[str, Any]],
+    instructors_map: dict[str, InstructorProfile],
+    lookup: InstructorLookup,
+) -> None:
+    tag_order = {"lec": 0, "tut": 1, "lab": 2, "class": 3}
+    by_course = _group_elective_lessons_by_course(grouped_electives)
+
+    for course_name, lessons in by_course.items():
+        alias = _elective_alias_token_for_lessons(lessons)
+        parallels = _elective_parallel_groups_for_lessons(lessons)
+        shared_lessons = [lesson for lesson in lessons if not _elective_parallel_stream_group(lesson)]
+        parallel_lessons: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for lesson in lessons:
+            parallel = _elective_parallel_stream_group(lesson)
+            if parallel:
+                parallel_lessons[parallel].append(lesson)
+
+        if parallels:
+            audience = [elective_student_group_id(alias, parallel) for parallel in parallels]
+            if shared_lessons:
+                shared_cls = _elective_component_from_lessons(
+                    shared_lessons,
+                    audience,
+                    instructors_map,
+                    lookup,
+                    shared_for_parallel_groups=True,
+                )
+                if shared_cls:
+                    courses_map[course_name].append(shared_cls)
+            for parallel in parallels:
+                parallel_cls = _elective_component_from_lessons(
+                    parallel_lessons[parallel],
+                    [elective_student_group_id(alias, parallel)],
+                    instructors_map,
+                    lookup,
+                    shared_for_parallel_groups=False,
+                )
+                if parallel_cls:
+                    courses_map[course_name].append(parallel_cls)
+        else:
+            single_cls = _elective_component_from_lessons(
+                lessons,
+                [elective_student_group_id(alias)],
+                instructors_map,
+                lookup,
+                shared_for_parallel_groups=False,
+            )
+            if single_cls:
+                courses_map[course_name].append(single_cls)
+
+        course_is_elective[course_name] = True
+
+    for course_name, components in courses_map.items():
+        if not course_is_elective.get(course_name):
+            continue
+        courses_map[course_name] = sorted(
+            components,
+            key=lambda cls: (
+                tag_order.get(cls.get("tag", ""), 99),
+                tuple(cls.get("student_groups") or []),
+            ),
+        )
 
 
 def detect_block_key(google_sheet_name: str | None) -> str | None:
@@ -1180,53 +2499,24 @@ def output_path_for_block(base_output: Path, block_key: str) -> Path:
     return base_output.with_name(f"{base_output.stem}-{block_key}{base_output.suffix}")
 
 
-def _row_is_elective(row: dict[str, Any]) -> bool:
-    alias_fields = (
-        "event_group_alias",
-        "group_alias",
-        "event_group",
-    )
-    aliases: list[str] = []
-    for field in alias_fields:
-        value = row.get(field)
-        if isinstance(value, str):
-            cleaned = value.strip().lower()
-            if cleaned:
-                aliases.append(cleaned)
-        elif isinstance(value, list):
-            aliases.extend(str(item).strip().lower() for item in value if str(item).strip())
-        elif isinstance(value, dict):
-            aliases.extend(str(item).strip().lower() for item in value.values() if str(item).strip())
-    return any(alias.startswith(ELECTIVE_ALIAS_PREFIXES) for alias in aliases)
-
-
-def _load_elective_group_ids_from_predefined(predefined_json_path: Path) -> set[str]:
-    if not predefined_json_path.exists():
-        return set()
-    try:
-        payload = json.loads(predefined_json_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return set()
-    predefined = payload.get("academic_groups")
-    if not isinstance(predefined, list):
-        return set()
-
-    out: set[str] = set()
-    for item in predefined:
-        if not isinstance(item, dict):
-            continue
-        alias = str(item.get("event_group_alias") or "").strip().lower()
-        if not alias.startswith(ELECTIVE_ALIAS_PREFIXES):
-            continue
-        gid = str(item.get("name") or "").strip()
-        if gid and gid.lower() not in IGNORED_ELECTIVE_GROUP_IDS:
-            out.add(gid)
-    return out
-
-
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Convert core-courses-lessons JSON into config-candidate.yaml")
-    parser.add_argument("input_json", type=Path)
+    parser = argparse.ArgumentParser(
+        description="Convert core-courses and elective lessons YAML into config-candidate.yaml"
+    )
+    parser.add_argument(
+        "core_courses_yaml",
+        type=Path,
+        nargs="?",
+        default=DEFAULT_CORE_COURSES_YAML,
+        help=f"Grouped core courses lessons YAML (default: {DEFAULT_CORE_COURSES_YAML.name})",
+    )
+    parser.add_argument(
+        "electives_yaml",
+        type=Path,
+        nargs="?",
+        default=DEFAULT_ELECTIVES_YAML,
+        help=f"Grouped electives lessons YAML (default: {DEFAULT_ELECTIVES_YAML.name})",
+    )
     parser.add_argument("output_yaml", type=Path, nargs="?", default=Path("config-candidate.yaml"))
     parser.add_argument(
         "--english-distribution-xlsx",
@@ -1246,22 +2536,23 @@ def main() -> None:
         default=Path("predefined.json"),
         help="Path to predefined.json with academic_groups students",
     )
+    parser.add_argument(
+        "--users-csv",
+        type=Path,
+        default=None,
+        help="Staff directory CSV (displayName -> email as instructor id). "
+        "If omitted, loads People.25-26.csv and/or exportUsers_2026-4-14.csv from the project dir.",
+    )
     args = parser.parse_args()
 
-    rows: list[dict[str, Any]] = json.loads(args.input_json.read_text(encoding="utf-8"))
-    if not rows:
-        raise ValueError("Input JSON is empty")
-    elective_group_ids: set[str] = set()
-    for row in rows:
-        if not _row_is_elective(row):
-            continue
-        group_field = row.get("group_name")
-        groups = group_field if isinstance(group_field, list) else [group_field]
-        for group in groups:
-            group_id = str(group or "").strip()
-            if group_id and group_id.lower() not in IGNORED_ELECTIVE_GROUP_IDS:
-                elective_group_ids.add(group_id)
+    search_dirs = resolve_lessons_search_dirs(args.core_courses_yaml)
+    core_courses_path = resolve_data_path(args.core_courses_yaml, *search_dirs)
+    electives_path = resolve_data_path(args.electives_yaml, *search_dirs)
 
+    rows: list[dict[str, Any]] = load_core_courses_file(core_courses_path)
+    grouped_elective_lessons = load_grouped_elective_lessons(electives_path)
+    if not rows and not grouped_elective_lessons:
+        raise ValueError("Core courses input is empty")
     block_rows: dict[str, list[dict[str, Any]]] = {"block1": [], "block2": []}
     unclassified_rows: list[dict[str, Any]] = []
     for row in rows:
@@ -1271,22 +2562,15 @@ def main() -> None:
         else:
             unclassified_rows.append(row)
 
-    distribution_path = args.english_distribution_xlsx
-    if not distribution_path.exists():
-        candidate = args.input_json.parent / distribution_path
-        if candidate.exists():
-            distribution_path = candidate
-    rooms_json_path = args.rooms_json
-    if not rooms_json_path.exists():
-        candidate = args.input_json.parent / rooms_json_path
-        if candidate.exists():
-            rooms_json_path = candidate
-    predefined_json_path = args.predefined_json
-    if not predefined_json_path.exists():
-        candidate = args.input_json.parent / predefined_json_path
-        if candidate.exists():
-            predefined_json_path = candidate
-    elective_group_ids.update(_load_elective_group_ids_from_predefined(predefined_json_path))
+    distribution_path = resolve_data_path(args.english_distribution_xlsx, *search_dirs)
+    rooms_json_path = resolve_data_path(args.rooms_json, *search_dirs)
+    predefined_json_path = resolve_data_path(args.predefined_json, *search_dirs)
+    users_csv_paths = resolve_users_csv_paths(
+        args.users_csv,
+        core_courses_path.parent,
+        Path.cwd(),
+    )
+    instructor_lookup = load_instructor_lookup(users_csv_paths)
     rooms = load_rooms(rooms_json_path)
 
     (
@@ -1299,28 +2583,24 @@ def main() -> None:
     programs = attach_english_to_programs(PROGRAMS, shared_groups)
     academic_groups = collect_academic_groups(PROGRAMS)
     academic_groups = enrich_academic_groups_from_predefined(academic_groups, predefined_json_path)
-    sections = build_sections(PROGRAMS, shared_groups, elective_group_ids)
-    students_groups = build_students_groups(academic_groups, shared_groups, elective_group_ids)
+    summer_elective_student_groups = collect_elective_student_groups(grouped_elective_lessons)
+    summer_elective_group_ids = [str(group["code"]) for group in summer_elective_student_groups if group.get("code")]
+    sections = build_sections(PROGRAMS, shared_groups, set())
+    sections = append_summer_electives_to_sections(sections, summer_elective_group_ids)
+    students_groups = build_students_groups(academic_groups, shared_groups, set())
+    students_groups.extend(summer_elective_student_groups)
 
-    instructors_map: dict[str, str] = {}
+    instructors_map: dict[str, InstructorProfile] = {}
+    seed_instructors_from_people_roster(instructors_map, instructor_lookup)
     aggregated: dict[PatternKey, dict[str, Any]] = {}
 
     for r in rows:
         course = normalize_lesson_name(r["lesson_name"])
         if should_exclude_lesson(course):
             continue
-        class_tag = normalize_class_tag(r.get("lesson_class_type"))
-        teacher_names = split_teacher_names(r.get("teacher"))
-        teacher_ids = tuple(sorted(to_instructor_id(name) for name in teacher_names))
-        key = PatternKey(
-            course=course,
-            class_tag=class_tag,
-            room=(r.get("room_name") or ""),
-            # Source sometimes splits one logical stream into multiple date ranges
-            # (e.g., around block boundaries). Keep stream identity stable here.
-            start_date="",
-            end_date="",
-        )
+        teacher_names = split_teacher_names(r["teacher"])
+        teacher_signature = _teacher_signature(teacher_names, instructors_map, instructor_lookup)
+        key = _pattern_key_from_row(r)
         if key not in aggregated:
             aggregated[key] = {
                 "groups": set(),
@@ -1328,38 +2608,59 @@ def main() -> None:
                 "teacher_signatures": set(),
                 "groups_by_signature": defaultdict(set),
                 "slots_by_signature": defaultdict(lambda: defaultdict(set)),
+                "occurrences_by_signature": defaultdict(lambda: defaultdict(list)),
+                "edits_by_slot": defaultdict(list),
                 "duration_slots": 1,
                 "slots_by_group": defaultdict(set),
+                "shared_group_batches": set(),
+                "is_elective": False,
             }
+        aggregated[key]["teacher_signatures"].add(teacher_signature)
 
-        for tid, tname in zip((to_instructor_id(name) for name in teacher_names), teacher_names):
-            instructors_map[tid] = tname
-        aggregated[key]["teacher_signatures"].add(teacher_ids)
-
-        group_field = r["group_name"]
-        groups = group_field if isinstance(group_field, list) else [group_field]
-        groups = [g for g in groups if g]
+        groups = normalize_group_names(r["group_name"])
+        if len(groups) > 1:
+            aggregated[key]["shared_group_batches"].add(frozenset(groups))
         aggregated[key]["raw_groups"].update(groups)
         if is_english_lesson(course):
-            day = WEEKDAY_TO_SHORT[r["weekday"]]
+            day = Weekday(r["weekday"]).value
             start = normalize_time(r["start_time"])
             matched_groups: set[str] = set()
-            for tid in teacher_ids:
-                matched_groups.update(english_slot_instr_map.get((day, start, tid), set()))
+            for instructor_name in teacher_names:
+                matched_groups.update(english_slot_instr_map.get((day, start, instructor_name), set()))
             if not matched_groups:
                 matched_groups.update(english_slot_map.get((day, start), set()))
             if matched_groups:
                 groups = sorted(matched_groups)
-        aggregated[key]["groups_by_signature"][teacher_ids].update(groups)
+        aggregated[key]["groups_by_signature"][teacher_signature].update(groups)
         aggregated[key]["groups"].update(groups)
-        # Per-week frequency should come from recurring weekly rows only.
-        # Rows with date_on are typically one-off replacements and should not
-        # increase regular weekly frequency.
-        if not r.get("date_on"):
-            slot_sig = (r["weekday"], normalize_time(r["start_time"]))
-            for g in groups:
-                aggregated[key]["slots_by_group"][g].add(slot_sig)
-                aggregated[key]["slots_by_signature"][teacher_ids][g].add(slot_sig)
+        modifiers = r.get("modifiers") or {}
+        if _is_occurrence_only_modifier(modifiers):
+            for occurrence in _core_occurrences_from_row(r, teacher_signature):
+                for group_id in groups:
+                    aggregated[key]["occurrences_by_signature"][teacher_signature][group_id].append(occurrence)
+        elif _is_weekly_with_nest_modifier(modifiers):
+            slot_sig: WeeklySlotSig = (
+                r["weekday"],
+                normalize_time(r["start_time"]),
+                normalize_time(r["end_time"]),
+                _normalize_room_value(r.get("room")),
+                teacher_signature,
+            )
+            for group_id in groups:
+                aggregated[key]["slots_by_group"][group_id].add(slot_sig)
+                aggregated[key]["slots_by_signature"][teacher_signature][group_id].add(slot_sig)
+            aggregated[key]["edits_by_slot"][slot_sig].extend(_nest_edits_from_modifiers(modifiers))
+        else:
+            slot_sig = (
+                r["weekday"],
+                normalize_time(r["start_time"]),
+                normalize_time(r["end_time"]),
+                _normalize_room_value(r.get("room")),
+                teacher_signature,
+            )
+            for group_id in groups:
+                aggregated[key]["slots_by_group"][group_id].add(slot_sig)
+                aggregated[key]["slots_by_signature"][teacher_signature][group_id].add(slot_sig)
 
         duration_minutes = (
             datetime.strptime(normalize_time(r["end_time"]), "%H:%M")
@@ -1367,24 +2668,28 @@ def main() -> None:
         ).seconds // 60
         aggregated[key]["duration_slots"] = max(aggregated[key]["duration_slots"], 1, round(duration_minutes / 90))
     selector_map = build_group_selectors(programs)
-    group_order = build_group_order(programs)
+    group_order = build_group_order_from_sections(sections)
 
     def render_config(selected_rows: list[dict[str, Any]]) -> dict[str, Any]:
-        global_start = min(r["start_date"] for r in selected_rows)
-        global_end = max(r["end_date"] for r in selected_rows)
+        term_starts = [r["start_date"] for r in selected_rows if r.get("start_date")]
+        term_ends = [r["end_date"] for r in selected_rows if r.get("end_date")]
+        for lesson in grouped_elective_lessons:
+            dates = _elective_occurrence_dates(lesson)
+            if dates:
+                term_starts.append(min(dates).isoformat())
+                term_ends.append(max(dates).isoformat())
+        if not term_starts or not term_ends:
+            raise ValueError("Cannot determine term dates from input rows or electives")
+        global_start = min(term_starts)
+        global_end = max(term_ends)
         selected_keys = {
-            PatternKey(
-                course=normalize_lesson_name(row["lesson_name"]),
-                class_tag=normalize_class_tag(row.get("lesson_class_type")),
-                room=(row.get("room_name") or ""),
-                start_date="",
-                end_date="",
-            )
+            _pattern_key_from_row(row)
             for row in selected_rows
             if not should_exclude_lesson(normalize_lesson_name(row["lesson_name"]))
         }
 
         courses_map: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        course_is_elective: dict[str, bool] = defaultdict(bool)
         tag_order = {"lec": 0, "tut": 1, "lab": 2, "class": 3}
         for pattern, data in sorted(
             aggregated.items(),
@@ -1396,6 +2701,8 @@ def main() -> None:
         ):
             if pattern not in selected_keys:
                 continue
+            if data.get("is_elective"):
+                course_is_elective[pattern.course] = True
             teacher_signatures = sorted(data["teacher_signatures"])
 
             # Build emission variants:
@@ -1424,7 +2731,7 @@ def main() -> None:
             emission_variants: list[tuple[list[str], Any, list[tuple[str, ...]]]] = []
             for groups_for_cls, slots_source, signatures_for_pool in base_variants:
                 if pattern.class_tag in {"lec", "tut"}:
-                    groups_by_slot_fingerprint: dict[tuple[tuple[str, str], ...], list[str]] = defaultdict(list)
+                    groups_by_slot_fingerprint: dict[tuple[WeeklySlotSig, ...], list[str]] = defaultdict(list)
                     for gid in groups_for_cls:
                         slot_fingerprint = tuple(sorted(slots_source.get(gid, set())))
                         groups_by_slot_fingerprint[slot_fingerprint].append(gid)
@@ -1451,24 +2758,18 @@ def main() -> None:
                 if data["duration_slots"] != 1:
                     cls["duration_slots"] = data["duration_slots"]
                 if is_english_lesson(pattern.course):
-                    cls["instructor_pool"] = sorted({tid for sig in signatures_for_pool for tid in sig})
-                elif len(signatures_for_pool) == 1:
-                    sig = signatures_for_pool[0]
-                    if len(sig) == 0:
-                        cls["instructor_pool"] = []
-                    elif len(sig) == 1:
-                        cls["instructor_pool"] = [sig[0]]
-                    else:
-                        cls["instructor_pool"] = [list(sig)]
-                elif all(len(sig) == 1 for sig in signatures_for_pool):
-                    cls["instructor_pool"] = sorted({sig[0] for sig in signatures_for_pool})
+                    cls["instructor_pool"] = sorted(
+                        sig[0] for sig in signatures_for_pool if sig
+                    )
                 else:
-                    cls["instructor_pool"] = [list(sig) for sig in signatures_for_pool]
+                    cls["instructor_pool"] = _build_instructor_pool(signatures_for_pool)
+                is_shared_lesson = frozenset(groups_for_cls) in data.get("shared_group_batches", set())
                 if infer_per_group(
                     pattern.class_tag,
                     cls["student_groups"],
                     is_english_course=is_english_lesson(pattern.course),
                     source_group_count=len(groups_for_cls),
+                    is_shared_lesson=is_shared_lesson,
                 ):
                     cls["per_group"] = True
                 if is_english_lesson(pattern.course) and cls.get("tag") == "class":
@@ -1487,7 +2788,10 @@ def main() -> None:
                                     split_cls["per_week"] = xlsx_per_week
                             xlsx_instructors = english_group_instructors.get(token, set())
                             if xlsx_instructors:
-                                split_cls["instructor_pool"] = sorted(xlsx_instructors)
+                                split_cls["instructor_pool"] = sorted(
+                                    register_instructor(name, instructors_map, instructor_lookup)
+                                    for name in xlsx_instructors
+                                )
                                 courses_map[pattern.course].append(split_cls)
                                 continue
                             # Narrow teacher pool to instructors that actually teach
@@ -1496,10 +2800,32 @@ def main() -> None:
                                 sig for sig in teacher_signatures if token in data["groups_by_signature"].get(sig, set())
                             ]
                             if group_signatures:
-                                split_cls["instructor_pool"] = sorted({tid for sig in group_signatures for tid in sig})
+                                split_cls["instructor_pool"] = sorted(
+                                    name for sig in group_signatures for name in sig
+                                )
                             courses_map[pattern.course].append(split_cls)
                         continue
+                if not data.get("is_elective") and not is_english_lesson(pattern.course):
+                    sessions = _core_sessions_from_slots(
+                        groups_for_cls,
+                        slots_source,
+                        cls["student_groups"],
+                        per_group=bool(cls.get("per_group")),
+                        occurrences_by_signature=data["occurrences_by_signature"],
+                        signatures_for_pool=signatures_for_pool,
+                        edits_by_slot=data["edits_by_slot"],
+                    )
+                    if sessions:
+                        cls["sessions"] = sessions
                 courses_map[pattern.course].append(cls)
+
+        merge_elective_courses(
+            courses_map,
+            course_is_elective,
+            grouped_elective_lessons,
+            instructors_map,
+            instructor_lookup,
+        )
 
         for course_name, components in courses_map.items():
             courses_map[course_name] = sorted(
@@ -1617,37 +2943,51 @@ def main() -> None:
             courses_map[course_name] = rebuilt
 
         instructors = [
-            {
-                "id": iid,
-                "name": name,
-            }
-            for iid, name in sorted(instructors_map.items())
+            profile.to_config_dict()
+            for profile in sorted(instructors_map.values(), key=lambda item: item.preferred_name().casefold())
         ]
 
-        course_items = []
-        for course_name, components in sorted(courses_map.items()):
+        course_entries: list[tuple[bool, str, dict[str, Any]]] = []
+        for course_name, components in courses_map.items():
             direct_group_tokens = {
                 token
                 for component in components
                 for token in component.get("student_groups", [])
                 if isinstance(token, str) and not token.startswith("@")
             }
-            is_elective_course = bool(direct_group_tokens) and direct_group_tokens.issubset(elective_group_ids)
-            course_items.append(
-                {
-                    "name": course_name,
-                    "course_tags": infer_course_tags(course_name, is_elective_course=is_elective_course),
-                    "components": components,
-                }
+            is_elective_course = course_is_elective.get(course_name, False) or any(
+                str(token).startswith(f"{SUMMER_ELECTIVE_TERM_PREFIX}-")
+                for component in components
+                for token in component.get("student_groups", [])
+                if isinstance(token, str)
             )
+            course_entries.append(
+                (
+                    is_elective_course,
+                    course_name,
+                    {
+                        "name": course_name,
+                        "course_tags": infer_course_tags(course_name, is_elective_course=is_elective_course),
+                        "components": components,
+                    },
+                )
+            )
+        course_items = [
+            item
+            for _, _, item in sorted(
+                course_entries,
+                key=lambda entry: (
+                    entry[0],
+                    course_group_rank(entry[2], selector_map, group_order),
+                    entry[1].casefold(),
+                ),
+            )
+        ]
 
         return {
             "term": {
                 "name": "Spring 2026",
                 "semester": {"start_date": global_start, "end_date": global_end},
-                "days": _default_term_days_from_config_class(),
-                "starting_day": _default_starting_day_from_config_class(),
-                "time_slots": _default_time_slots_from_config_class(),
             },
             "rooms": rooms,
             "instructors": instructors,
@@ -1666,17 +3006,11 @@ def main() -> None:
                 continue
             output_path = output_path_for_block(args.output_yaml, block_key)
             styled_config = apply_yaml_style_overrides(render_config(selected_rows))
-            output_path.write_text(
-                yaml.dump(styled_config, Dumper=ConfigDumper, allow_unicode=True, sort_keys=False),
-                encoding="utf-8",
-            )
+            output_path.write_text(dump_config_yaml(styled_config), encoding="utf-8")
             print(f"Wrote {output_path}")
     else:
         styled_config = apply_yaml_style_overrides(render_config(rows))
-        args.output_yaml.write_text(
-            yaml.dump(styled_config, Dumper=ConfigDumper, allow_unicode=True, sort_keys=False),
-            encoding="utf-8",
-        )
+        args.output_yaml.write_text(dump_config_yaml(styled_config), encoding="utf-8")
         print(f"Wrote {args.output_yaml}")
 
 

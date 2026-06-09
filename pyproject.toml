@@ -6,14 +6,18 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "cpmpy>=0.10.0",
+    "httpx>=0.28.1",
     "ortools>=9.14.6206",
     "pydantic>=2.11.5",
     "pytest>=8.0",
     "pyyaml>=6.0.2",
+    "prompt-toolkit>=3.0.0",
     "tqdm>=4.67.1",
 ]
 
 [project.scripts]
+book-electives = "book_electives:main"
+book = "book:main"
 config-tui = "config_tui:main"
 schedule-main = "main:main"
 
