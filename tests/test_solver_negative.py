@@ -1,6 +1,5 @@
 """Negative-path tests for main.solve_schedule."""
 
-from __future__ import annotations
 
 from main import Schedule, solve_schedule
 from metrics import assert_all_satisfied

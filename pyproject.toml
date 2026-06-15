@@ -18,8 +18,8 @@ dependencies = [
 [project.scripts]
 book-electives = "book_electives:main"
 book = "book:main"
+build-instructors = "instructors_roster:main"
 config-tui = "config_tui:main"
-schedule-main = "main:main"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

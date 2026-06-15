@@ -1,10 +1,9 @@
-from __future__ import annotations
 
 import datetime
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Self
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
@@ -96,6 +95,19 @@ class InstructorConfig(SettingBaseModel):
     "Short handle or Telegram-style alias from staff roster"
     position: str | None = None
     "Staff position from roster (for example, Professor, Visiting)"
+
+
+class InstructorsConfig(SettingBaseModel):
+    """Standalone instructors file (same shape as schedule-builder-backend instructors config)."""
+
+    instructors: list[InstructorConfig] = []
+    "Available instructors"
+
+    @classmethod
+    def from_yaml(cls, path: Path) -> Self:
+        with open(path, encoding="utf-8") as handle:
+            payload = yaml.safe_load(handle)
+        return cls.model_validate(payload)
 
 
 class SectionConfig(SettingBaseModel):
@@ -265,6 +277,12 @@ class CourseConfig(SettingBaseModel):
 
     name: str
     "Course name"
+    short_name: str | None = None
+    "Short English display name"
+    name_ru: str | None = None
+    "Russian display name"
+    short_name_ru: str | None = None
+    "Short Russian display name"
     course_tags: list[CommonCourseTags | str] = []
     "Course tags (for example, core_course / elective / english)"
     components: list[Component]
@@ -288,7 +306,7 @@ class ScheduleConfig(SettingBaseModel):
     "All courses to schedule"
 
     @classmethod
-    def from_yaml(cls, path: Path) -> ScheduleConfig:
+    def from_yaml(cls, path: Path) -> Self:
         with open(path, encoding="utf-8") as f:
             yaml_config = yaml.safe_load(f)
         return cls.model_validate(yaml_config)

@@ -16,37 +16,28 @@ Run commands with `uv run …` so they use the project environment (examples bel
 ## Generate configs 
 
 ```bash
+uv run instructors_roster.py
 uv run convert_json_to_config_candidate.py
 ```
 
-Reads `core-courses-lessons-sum-2026.yaml` and merges `electives-lessons-sum-2026.yaml` from the project directory (or cwd). Override paths with positional `core_courses_yaml` and `electives_yaml`.
+`instructors_roster.py` reads People/exportUsers CSV rosters and writes `instructors.yaml` (same schema as schedule-builder-backend instructors config).
+
+`convert_json_to_config_candidate.py` reads `core-courses-lessons-sum-2026.yaml` and merges `electives-lessons-sum-2026.yaml` from the project directory (or cwd). Override paths with positional `core_courses_yaml` and `electives_yaml`.
 
 ```bash
 uv run tests/cases/generate_cases.py
 ```
 
-## Run the solver (`main.py`)
+## Run the solver
+
+Solver and metrics were moved to **schedule-builder-backend** (`scripts/solve.py`, `scripts/metrics.py`) and use the same `ScheduleConfig` schemas as the API.
+
+From `schedule-builder-backend`:
 
 ```bash
-uv run main.py tests/cases/feasible_by_program_year_block1/core_year_1.yaml --no-progress
+uv sync --group solver
+uv run --group solver python scripts/solve.py path/to/config.yaml --no-progress
 ```
-
-Usage:
-```txt
-dante@dante-pc:~/Projects/one-zero-eight/schedule-assistant$ uv run main.py --help
-usage: main.py [-h] [--time-limit TIME_LIMIT] [--num-workers NUM_WORKERS] [--artifacts-dir ARTIFACTS_DIR] [--no-progress] config
-
-positional arguments:
-  config
-
-options:
-  -h, --help            show this help message and exit
-  --time-limit TIME_LIMIT
-  --num-workers NUM_WORKERS
-  --artifacts-dir ARTIFACTS_DIR
-  --no-progress
-```
-
 
 **Output:** prints `status` and `stats` to stdout. Writes the full result to:
 
@@ -56,26 +47,25 @@ Solver phase logs may appear as `solver_log_phase_*.txt` in that same folder.
 
 For experiments better to pass `--artifacts-dir <path>` to avoid clobbering the default `results/` directory and to be able to run several experiments in parallel.
 
-## Check metrics (`metrics.py`)
-
-Compares the **config** with a **solver output** and prints a human-readable report (conflicts, soft-constraint satisfaction, loads, room use, etc.).
+## Check metrics
 
 ```bash
-uv run metrics.py \
-  --config tests/cases/feasible_by_program_year_block1/core_year_1.yaml \
+cd ../schedule-builder-backend
+uv run --group solver python scripts/metrics.py \
+  --config ../schedule-assistant/tests/cases/feasible_by_program_year_block1/core_year_1.yaml \
   --solution "$(ls -1t results/*/output.yaml | head -n1)"
 ```
 
 For machine-readable output:
 
 ```bash
-uv run metrics.py \
-  --config tests/cases/feasible_by_program_year_block1/core_year_1.yaml \
+uv run --group solver python scripts/metrics.py \
+  --config path/to/config.yaml \
   --solution results/<timestamp>_<term-slug>/output.yaml \
   --json
 ```
 
-Use the `output.yaml` from the same `main.py` run (under `results/...`).
+Use the `output.yaml` from the same `scripts/solve.py` run (under `results/...`).
 
 ## Get cpsat-primer examples and README.md
 

@@ -1,6 +1,5 @@
 """prompt_toolkit TUI to preview and batch-book courses from ScheduleConfig via room-booking BMP API."""
 
-from __future__ import annotations
 
 import argparse
 import os

@@ -1,6 +1,5 @@
 """Basic tests for main.solve_schedule."""
 
-from __future__ import annotations
 
 from pathlib import Path
 
