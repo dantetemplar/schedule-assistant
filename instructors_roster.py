@@ -70,7 +70,83 @@ _GIVEN_NAME_VARIANTS: dict[str, set[str]] = {
     "andrey": {"andrei", "andrey"},
     "alexandr": {"alexandr", "alexander"},
     "alexander": {"alexandr", "alexander"},
+    "mikhail": {"mikhail", "michael"},
+    "michael": {"mikhail", "michael"},
+    "nikolai": {"nikolai", "nikolay", "nicolai", "nicolay"},
+    "nikolay": {"nikolai", "nikolay", "nicolai", "nicolay"},
+    "nicolai": {"nikolai", "nikolay", "nicolai", "nicolay"},
+    "nicolay": {"nikolai", "nikolay", "nicolai", "nicolay"},
+    "sergei": {"sergei", "sergey", "sergio"},
+    "sergey": {"sergei", "sergey", "sergio"},
+    "sergio": {"sergei", "sergey", "sergio"},
 }
+
+# Passport / scholarly RU→LAT (щ→shch matches Moshchanetskii).
+_CYR_TO_LAT = {
+    "а": "a",
+    "б": "b",
+    "в": "v",
+    "г": "g",
+    "д": "d",
+    "е": "e",
+    "ё": "e",
+    "ж": "zh",
+    "з": "z",
+    "и": "i",
+    "й": "i",
+    "к": "k",
+    "л": "l",
+    "м": "m",
+    "н": "n",
+    "о": "o",
+    "п": "p",
+    "р": "r",
+    "с": "s",
+    "т": "t",
+    "у": "u",
+    "ф": "f",
+    "х": "kh",
+    "ц": "ts",
+    "ч": "ch",
+    "ш": "sh",
+    "щ": "shch",
+    "ъ": "",
+    "ы": "y",
+    "ь": "",
+    "э": "e",
+    "ю": "yu",
+    "я": "ya",
+}
+
+
+def transliterate_ru_to_en(text: str, *, y_for_short_i: bool = False) -> str:
+    table = dict(_CYR_TO_LAT)
+    if y_for_short_i:
+        table["й"] = "y"
+    return "".join(table.get(ch, ch) for ch in text.casefold())
+
+
+def _latin_forms(name: str) -> list[str]:
+    """Latin renderings of a name (й→i and й→y variants)."""
+    if not _has_cyrillic(name):
+        return [name]
+    forms = [
+        transliterate_ru_to_en(name),
+        transliterate_ru_to_en(name, y_for_short_i=True),
+    ]
+    seen: set[str] = set()
+    unique: list[str] = []
+    for form in forms:
+        key = normalize_person_name(form)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(form)
+    return unique
+
+
+def _latin_form(name: str) -> str:
+    return _latin_forms(name)[0]
 
 
 def _given_names_compatible(left: str, right: str) -> bool:
@@ -86,14 +162,24 @@ def _en_name_lookup_keys(name: str) -> list[str]:
     cleaned = " ".join(name.split())
     if not cleaned:
         return []
-    keys = {normalize_person_name(cleaned)}
-    parts = cleaned.split()
-    if len(parts) >= 2:
+    keys: set[str] = {normalize_person_name(cleaned)}
+    for latin in _latin_forms(cleaned):
+        keys.add(normalize_person_name(latin))
+        parts = latin.split()
+        if len(parts) < 2:
+            continue
         keys.add(normalize_person_name(f"{parts[1]} {parts[0]}"))
         given = parts[0]
         family = " ".join(parts[1:])
         for variant in _GIVEN_NAME_VARIANTS.get(given.casefold(), {given}):
             keys.add(normalize_person_name(f"{variant} {family}"))
+        # FIO / family-given: also index given+family without patronymic.
+        if len(parts) >= 3:
+            keys.add(normalize_person_name(f"{parts[1]} {parts[0]}"))
+            keys.add(normalize_person_name(f"{parts[0]} {parts[1]}"))
+            for variant in _GIVEN_NAME_VARIANTS.get(parts[1].casefold(), {parts[1]}):
+                keys.add(normalize_person_name(f"{variant} {parts[0]}"))
+                keys.add(normalize_person_name(f"{parts[0]} {variant}"))
     return list(keys)
 
 
@@ -105,7 +191,42 @@ def _ru_name_lookup_keys(name: str) -> list[str]:
     keys = {normalize_person_name(cleaned)}
     if len(parts) >= 2:
         keys.add(normalize_person_name(f"{parts[1]} {parts[0]}"))
+    if len(parts) >= 3:
+        # FIO → given family / family given without patronymic
+        keys.add(normalize_person_name(f"{parts[1]} {parts[0]}"))
+        keys.add(normalize_person_name(f"{parts[0]} {parts[1]}"))
+    # Latin forms so EN lesson names resolve to the same instructor
+    for key in list(keys):
+        for latin in _latin_forms(key):
+            keys.add(normalize_person_name(latin))
     return list(keys)
+
+
+def _given_family_candidates(name: str) -> list[tuple[str, str]]:
+    """Candidate (given, family) pairs in Latin, covering EN and RU FIO orders."""
+    parts = [p for p in name.split() if p]
+    if len(parts) < 2:
+        return []
+    candidates: list[tuple[str, str]] = []
+    for latin_name in _latin_forms(name):
+        latin_parts = latin_name.split()
+        if len(latin_parts) < 2:
+            continue
+        candidates.append((latin_parts[0], latin_parts[-1]))
+        candidates.append((latin_parts[-1], latin_parts[0]))
+        if len(latin_parts) >= 3:
+            # Traditional RU FIO: family given patronymic
+            candidates.append((latin_parts[1], latin_parts[0]))
+    # Deduplicate while preserving order
+    seen: set[tuple[str, str]] = set()
+    unique: list[tuple[str, str]] = []
+    for pair in candidates:
+        key = (pair[0].casefold(), pair[1].casefold())
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(pair)
+    return unique
 
 
 def _split_display_name(display_name: str) -> tuple[str | None, str | None]:
@@ -203,7 +324,7 @@ class InstructorProfile:
         if other.position and not self.position:
             self.position = other.position
         if not self.email:
-            self.id = self.name_en or self.name_ru or self.id
+            self.id = to_instructor_id(self.name_en or self.name_ru or self.id)
 
     def to_instructor_config(self) -> InstructorConfig:
         payload: dict[str, Any] = {"id": self.id}
@@ -331,6 +452,14 @@ class PeopleCatalog:
     def iter_with_email(self) -> list[PeopleEntry]:
         return list(self._by_email.values())
 
+    def iter_unique(self) -> list[PeopleEntry]:
+        unique: dict[int, PeopleEntry] = {}
+        for entry in self._by_name.values():
+            unique[id(entry)] = entry
+        for entry in self._by_email.values():
+            unique[id(entry)] = entry
+        return list(unique.values())
+
 
 @dataclass
 class InstructorLookup:
@@ -457,19 +586,23 @@ def _names_refer_to_same_person(left: InstructorProfile, right: InstructorProfil
                 continue
             if normalize_person_name(left_name) == normalize_person_name(right_name):
                 return True
-            if _has_cyrillic(left_name) or _has_cyrillic(right_name):
-                left_keys = set(_ru_name_lookup_keys(left_name))
-                right_keys = set(_ru_name_lookup_keys(right_name))
-                if left_keys & right_keys:
-                    return True
-                continue
-            left_parts = left_name.split()
-            right_parts = right_name.split()
-            if len(left_parts) >= 2 and len(right_parts) >= 2:
-                if left_parts[-1].casefold() == right_parts[-1].casefold() and _given_names_compatible(
-                    left_parts[0], right_parts[0]
-                ):
-                    return True
+
+            left_ru_keys = set(_ru_name_lookup_keys(left_name))
+            right_ru_keys = set(_ru_name_lookup_keys(right_name))
+            if left_ru_keys & right_ru_keys:
+                return True
+
+            left_en_keys = set(_en_name_lookup_keys(left_name))
+            right_en_keys = set(_en_name_lookup_keys(right_name))
+            if left_en_keys & right_en_keys:
+                return True
+
+            for left_given, left_family in _given_family_candidates(left_name):
+                for right_given, right_family in _given_family_candidates(right_name):
+                    if left_family.casefold() != right_family.casefold():
+                        continue
+                    if _given_names_compatible(left_given, right_given):
+                        return True
     return False
 
 
@@ -479,6 +612,140 @@ def profiles_should_merge(left: InstructorProfile, right: InstructorProfile) -> 
     left_tokens = _profile_label_tokens(left)
     right_tokens = _profile_label_tokens(right)
     return bool(left_tokens & right_tokens)
+
+
+def instructor_config_to_profile(instructor: InstructorConfig) -> InstructorProfile:
+    return InstructorProfile(
+        id=instructor.id,
+        name_en=instructor.name_en,
+        name_ru=instructor.name_ru,
+        email=instructor.email,
+        alias=instructor.alias,
+        position=instructor.position,
+    )
+
+
+def _prefer_canonical_id(left: InstructorConfig, right: InstructorConfig) -> str:
+    if left.email and not right.email:
+        return left.id
+    if right.email and not left.email:
+        return right.id
+    if left.email and right.email:
+        return left.id if left.email == left.id else right.id if right.email == right.id else left.id
+    if left.name_en and not right.name_en:
+        return left.id
+    if right.name_en and not left.name_en:
+        return right.id
+    # Prefer ASCII slug ids for stable references in YAML.
+    left_ascii = all(ord(ch) < 128 for ch in left.id)
+    right_ascii = all(ord(ch) < 128 for ch in right.id)
+    if left_ascii and not right_ascii:
+        return left.id
+    if right_ascii and not left_ascii:
+        return right.id
+    return left.id
+
+
+def collapse_duplicate_instructors(
+    instructors_map: dict[str, InstructorConfig],
+) -> dict[str, str]:
+    """
+    Merge cross-script / spelling-variant duplicates in-place.
+
+    Returns a redirect map: every id that ever appeared → surviving canonical id.
+    """
+    ids = list(instructors_map)
+    parent = {instructor_id: instructor_id for instructor_id in ids}
+
+    def find(instructor_id: str) -> str:
+        while parent[instructor_id] != instructor_id:
+            parent[instructor_id] = parent[parent[instructor_id]]
+            instructor_id = parent[instructor_id]
+        return instructor_id
+
+    def union(left_id: str, right_id: str) -> None:
+        root_left = find(left_id)
+        root_right = find(right_id)
+        if root_left != root_right:
+            parent[root_right] = root_left
+
+    for index, left_id in enumerate(ids):
+        left = instructor_config_to_profile(instructors_map[left_id])
+        for right_id in ids[index + 1 :]:
+            right = instructor_config_to_profile(instructors_map[right_id])
+            if left.email and right.email and left.email != right.email:
+                continue
+            if profiles_should_merge(left, right):
+                union(left_id, right_id)
+
+    groups: dict[str, list[str]] = {}
+    for instructor_id in ids:
+        groups.setdefault(find(instructor_id), []).append(instructor_id)
+
+    redirect: dict[str, str] = {}
+    for members in groups.values():
+        if len(members) == 1:
+            only_id = members[0]
+            redirect[only_id] = only_id
+            continue
+
+        keep_id = members[0]
+        for member_id in members[1:]:
+            keep_id = _prefer_canonical_id(
+                instructors_map[keep_id],
+                instructors_map[member_id],
+            )
+
+        kept = instructor_config_to_profile(instructors_map[keep_id])
+        for member_id in members:
+            if member_id == keep_id:
+                continue
+            kept.merge(instructor_config_to_profile(instructors_map[member_id]))
+            del instructors_map[member_id]
+
+        new_cfg = kept.to_instructor_config()
+        if keep_id in instructors_map:
+            del instructors_map[keep_id]
+        instructors_map[new_cfg.id] = new_cfg
+
+        for member_id in members:
+            redirect[member_id] = new_cfg.id
+        redirect[new_cfg.id] = new_cfg.id
+
+    return redirect
+
+
+def remap_instructor_ref(value: Any, id_map: dict[str, str]) -> Any:
+    if isinstance(value, str):
+        return id_map.get(value, value)
+    if isinstance(value, list):
+        remapped = [remap_instructor_ref(item, id_map) for item in value]
+        # Preserve unique order for instructor pools / multi-instructor fields.
+        if remapped and all(isinstance(item, str) for item in remapped):
+            seen: set[str] = set()
+            unique: list[str] = []
+            for item in remapped:
+                if item in seen:
+                    continue
+                seen.add(item)
+                unique.append(item)
+            return unique
+        return remapped
+    return value
+
+
+def remap_instructor_ids_in_obj(node: Any, id_map: dict[str, str]) -> Any:
+    if isinstance(node, dict):
+        out: dict[str, Any] = {}
+        for key, value in node.items():
+            if key in {"instructor", "instructor_pool"}:
+                out[key] = remap_instructor_ref(value, id_map)
+            else:
+                out[key] = remap_instructor_ids_in_obj(value, id_map)
+        return out
+    if isinstance(node, list):
+        return [remap_instructor_ids_in_obj(item, id_map) for item in node]
+    return node
 
 
 def resolve_instructor_profile(token: str, lookup: InstructorLookup) -> InstructorProfile:
@@ -503,7 +770,7 @@ def resolve_instructor_profile(token: str, lookup: InstructorLookup) -> Instruct
     if people:
         _apply_people_to_profile(profile, people)
     if not profile.email:
-        profile.id = profile.name_en or profile.name_ru or display_name
+        profile.id = to_instructor_id(profile.name_en or profile.name_ru or display_name)
     return profile
 
 
@@ -515,25 +782,51 @@ def register_instructor_profile(
     profile = resolve_instructor_profile(name, lookup)
     canonical_id = profile.id
 
-    for existing_id in list(instructors_map):
-        if existing_id == canonical_id:
-            continue
-        if profiles_should_merge(instructors_map[existing_id], profile):
-            profile.merge(instructors_map[existing_id])
-            del instructors_map[existing_id]
+    # Fast path: already present by email / id.
+    if profile.email and profile.email in instructors_map:
+        instructors_map[profile.email].merge(profile)
+        profile = instructors_map[profile.email]
+        canonical_id = profile.id
+    elif canonical_id in instructors_map:
+        instructors_map[canonical_id].merge(profile)
+        profile = instructors_map[canonical_id]
+        canonical_id = profile.id
+    else:
+        # Only compare against name-only stubs when we have an email; full scan
+        # otherwise (small People sheet). Avoid O(n²) over thousands of emails.
+        candidates = (
+            [
+                existing_id
+                for existing_id, existing in instructors_map.items()
+                if not existing.email
+            ]
+            if profile.email
+            else list(instructors_map)
+        )
+        for existing_id in candidates:
+            if existing_id == canonical_id:
+                continue
+            if profiles_should_merge(instructors_map[existing_id], profile):
+                profile.merge(instructors_map[existing_id])
+                del instructors_map[existing_id]
 
     existing = instructors_map.get(canonical_id)
-    if existing:
+    if existing and existing is not profile:
         existing.merge(profile)
         profile = existing
     instructors_map[canonical_id] = profile
+    # Re-key if merge promoted id to email.
+    if profile.id != canonical_id:
+        instructors_map.pop(canonical_id, None)
+        instructors_map[profile.id] = profile
+        canonical_id = profile.id
     return canonical_id
 
 
 def build_roster_from_lookup(lookup: InstructorLookup) -> list[InstructorConfig]:
     profiles: dict[str, InstructorProfile] = {}
-    for entry in lookup.people.iter_with_email():
-        token = entry.name_en or entry.email or ""
+    for entry in lookup.people.iter_unique():
+        token = entry.name_en or entry.name_ru or entry.email or ""
         if token:
             register_instructor_profile(token, profiles, lookup)
     for export in lookup.export_by_email.values():
@@ -542,7 +835,10 @@ def build_roster_from_lookup(lookup: InstructorLookup) -> list[InstructorConfig]
             register_instructor_profile(token, profiles, lookup)
     return [
         profile.to_instructor_config()
-        for profile in sorted(profiles.values(), key=lambda item: item.preferred_name().casefold())
+        for profile in sorted(
+            profiles.values(),
+            key=lambda item: item.preferred_name().casefold(),
+        )
     ]
 
 
@@ -614,17 +910,49 @@ class InstructorRegistry:
 
     def resolve_into_map(self, name: str, instructors_map: dict[str, InstructorConfig]) -> str:
         instructor_id = self.resolve_id(name)
-        if instructor_id not in instructors_map:
-            if instructor_id in self.by_id:
-                instructors_map[instructor_id] = self.by_id[instructor_id]
-            else:
-                display = " ".join(name.split())
-                name_en, name_ru = _split_display_name(display)
-                instructors_map[instructor_id] = InstructorConfig(
-                    id=instructor_id,
-                    name_en=name_en or (display if not name_ru else None),
-                    name_ru=name_ru,
-                )
+        if instructor_id in instructors_map:
+            existing = instructors_map[instructor_id]
+            display = " ".join(name.split())
+            name_en, name_ru = _split_display_name(display)
+            if name_en and not existing.name_en:
+                existing.name_en = name_en
+            if name_ru and (
+                not existing.name_ru
+                or len(name_ru.split()) > len(existing.name_ru.split())
+            ):
+                existing.name_ru = name_ru
+            return instructor_id
+
+        if instructor_id in self.by_id:
+            instructors_map[instructor_id] = self.by_id[instructor_id]
+            return instructor_id
+
+        display = " ".join(name.split())
+        name_en, name_ru = _split_display_name(display)
+        stub = InstructorConfig(
+            id=instructor_id,
+            name_en=name_en or (display if not name_ru else None),
+            name_ru=name_ru,
+        )
+        # Merge with an already-collected cross-script duplicate if present.
+        for existing_id, existing in list(instructors_map.items()):
+            left = instructor_config_to_profile(existing)
+            right = instructor_config_to_profile(stub)
+            if not profiles_should_merge(left, right):
+                continue
+            keep_id = _prefer_canonical_id(existing, stub)
+            kept = instructor_config_to_profile(
+                existing if keep_id == existing_id else stub
+            )
+            kept.merge(
+                instructor_config_to_profile(stub if keep_id == existing_id else existing)
+            )
+            new_cfg = kept.to_instructor_config()
+            if existing_id in instructors_map:
+                del instructors_map[existing_id]
+            instructors_map[new_cfg.id] = new_cfg
+            return new_cfg.id
+        instructors_map[instructor_id] = stub
         return instructor_id
 
 

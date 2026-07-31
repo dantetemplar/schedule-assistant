@@ -13,11 +13,28 @@ from typing import Any
 import yaml
 
 from config import InstructorConfig, Weekday
-from instructors_roster import DEFAULT_INSTRUCTORS_YAML, InstructorRegistry
+from instructors_roster import (
+    DEFAULT_INSTRUCTORS_YAML,
+    InstructorRegistry,
+    collapse_duplicate_instructors,
+    remap_instructor_ids_in_obj,
+)
 
-TERM_NAME = "Summer 2026"
-TERM_START = date(2026, 6, 1)
-TERM_END = date(2026, 7, 20)
+TERM_NAME = "Fall 2026"
+TERM_START = date(2026, 8, 24)
+TERM_END = date(2026, 12, 24)
+
+# Default term grid (must match schedule_config TermConfig.time_slots defaults).
+TERM_TIME_SLOTS: list[tuple[str, str]] = [
+    ("09:00", "10:30"),
+    ("10:40", "12:10"),
+    ("12:40", "14:10"),
+    ("14:20", "15:50"),
+    ("16:00", "17:30"),
+    ("17:40", "19:10"),
+    ("19:20", "20:50"),
+]
+TERM_TIME_SLOT_STARTS = {start for start, _ in TERM_TIME_SLOTS}
 
 EXCLUDED_ROOM_IDS = {
     "1.1",
@@ -36,8 +53,8 @@ EXCLUDED_ROOM_IDS = {
 }
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-DEFAULT_CORE_COURSES_YAML = Path("core-courses-lessons-sum-2026.yaml")
-DEFAULT_ELECTIVES_YAML = Path("electives-lessons-sum-2026.yaml")
+DEFAULT_CORE_COURSES_YAML = Path("core-courses-lessons-fall-2026.yaml")
+DEFAULT_ELECTIVES_YAML = Path("electives-lessons-fall-2026.yaml")
 
 def _group_entry_code(entry: Any) -> str:
     if isinstance(entry, str):
@@ -47,7 +64,7 @@ def _group_entry_code(entry: Any) -> str:
     return ""
 
 
-# Summer 2026 programs — groups referenced in core-courses-lessons-sum-2026.yaml.
+# Fall 2026 programs — groups referenced in core-courses-lessons-fall-2026.yaml.
 PROGRAMS: dict[str, list[dict[str, Any]]] = {
     "bachelor": [
         {
@@ -61,11 +78,80 @@ PROGRAMS: dict[str, list[dict[str, Any]]] = {
                     "code": "CSE",
                     "kind": "track",
                     "groups": [
+                        "B26-CSE-01",
+                        "B26-CSE-02",
+                        "B26-CSE-03",
+                        "B26-CSE-04",
+                        "B26-CSE-05",
+                    ],
+                },
+                {
+                    "name": "Data Science and Artificial Intelligence",
+                    "code": "DSAI",
+                    "kind": "track",
+                    "groups": [
+                        "B26-DSAI-01",
+                        "B26-DSAI-02",
+                        "B26-DSAI-03",
+                        "B26-DSAI-04",
+                        "B26-DSAI-05",
+                        "B26-DSAI-06",
+                    ],
+                },
+            ],
+        },
+        {
+            "code": "BS_Y1_RU",
+            "name": "BS - Year 1 (RU)",
+            "language": "ru",
+            "year": 1,
+            "tracks": [
+                {
+                    "name": "AI360",
+                    "code": "AI360",
+                    "kind": "track",
+                    "groups": ["B26-AI360-01"],
+                },
+                {
+                    "name": "MFAI",
+                    "code": "MFAI",
+                    "kind": "track",
+                    "groups": [
+                        "B26-MFAI-01",
+                        "B26-MFAI-02",
+                        "B26-MFAI-03",
+                        "B26-MFAI-04",
+                        "B26-MFAI-05",
+                        "B26-MFAI-06",
+                        "B26-MFAI-07",
+                    ],
+                },
+                {
+                    "name": "Robotics",
+                    "code": "RO",
+                    "kind": "track",
+                    "groups": ["B26-RO-01"],
+                },
+            ],
+        },
+        {
+            "code": "BS_Y2_EN",
+            "name": "BS - Year 2 (EN)",
+            "language": "en",
+            "year": 2,
+            "tracks": [
+                {
+                    "name": "Computer Science and Engineering",
+                    "code": "CSE",
+                    "kind": "track",
+                    "groups": [
                         "B25-CSE-01",
                         "B25-CSE-02",
                         "B25-CSE-03",
                         "B25-CSE-04",
                         "B25-CSE-05",
+                        "B25-CSE-06",
+                        "B25-CSE-07",
                     ],
                 },
                 {
@@ -83,24 +169,22 @@ PROGRAMS: dict[str, list[dict[str, Any]]] = {
             ],
         },
         {
-            "code": "BS_Y1_RU",
-            "name": "BS - Year 1 (RU)",
+            "code": "BS_Y2_RU",
+            "name": "BS - Year 2 (RU)",
             "language": "ru",
-            "year": 1,
+            "year": 2,
             "tracks": [
+                {
+                    "name": "AI360",
+                    "code": "AI360",
+                    "kind": "track",
+                    "groups": ["B25-AI360-01"],
+                },
                 {
                     "name": "MFAI",
                     "code": "MFAI",
                     "kind": "track",
-                    "groups": [
-                        "B25-MFAI-01",
-                        "B25-MFAI-02",
-                        "B25-MFAI-03",
-                        "B25-MFAI-04",
-                        "B25-MFAI-05",
-                        "B25-MFAI-06",
-                        "B25-MFAI-07",
-                    ],
+                    "groups": ["B25-MFAI-01", "B25-MFAI-02", "B25-MFAI-03", "B25-MFAI-04"],
                 },
                 {
                     "name": "Robotics",
@@ -111,10 +195,10 @@ PROGRAMS: dict[str, list[dict[str, Any]]] = {
             ],
         },
         {
-            "code": "BS_Y2_EN",
-            "name": "BS - Year 2 (EN)",
+            "code": "BS_Y3_EN",
+            "name": "BS - Year 3 (EN)",
             "language": "en",
-            "year": 2,
+            "year": 3,
             "tracks": [
                 {
                     "name": "Software Development",
@@ -126,19 +210,19 @@ PROGRAMS: dict[str, list[dict[str, Any]]] = {
                     "name": "Cybersecurity",
                     "code": "CBS",
                     "kind": "track",
-                    "groups": ["B24-CBS-01", "B24-CBS-02", "B24-CBS-03"],
+                    "groups": ["B24-CBS-01", "B24-CBS-02"],
                 },
                 {
                     "name": "Data Science",
                     "code": "DS",
                     "kind": "track",
-                    "groups": ["B24-DS-01"],
+                    "groups": ["B24-DS-01", "B24-DS-02"],
                 },
                 {
                     "name": "Artificial Intelligence",
                     "code": "AI",
                     "kind": "track",
-                    "groups": ["B24-AI-01", "B24-AI-02", "B24-AI-03"],
+                    "groups": ["B24-AI-01", "B24-AI-02"],
                 },
                 {
                     "name": "Game Development",
@@ -154,26 +238,6 @@ PROGRAMS: dict[str, list[dict[str, Any]]] = {
                 },
             ],
         },
-        {
-            "code": "BS_Y2_RU",
-            "name": "BS - Year 2 (RU)",
-            "language": "ru",
-            "year": 2,
-            "tracks": [
-                {
-                    "name": "MFAI",
-                    "code": "MFAI",
-                    "kind": "track",
-                    "groups": ["B24-MFAI-01", "B24-MFAI-02", "B24-MFAI-03", "B24-MFAI-04"],
-                },
-                {
-                    "name": "Robotics",
-                    "code": "RO",
-                    "kind": "track",
-                    "groups": ["B24-RO15-01"],
-                },
-            ],
-        },
     ],
     "master": [
         {
@@ -182,16 +246,49 @@ PROGRAMS: dict[str, list[dict[str, Any]]] = {
             "year": 1,
             "tracks": [
                 {
-                    "name": "Data Science",
-                    "code": "DS",
+                    "name": "AI and Data Engineering",
+                    "code": "AIDE",
                     "kind": "track",
-                    "groups": ["M25-DS-01"],
+                    "groups": ["M26-AIDE-01"],
+                },
+                {
+                    "name": "Robotics",
+                    "code": "RO",
+                    "kind": "track",
+                    "groups": ["M26-RO-01"],
+                },
+                {
+                    "name": "Software Engineering",
+                    "code": "SE",
+                    "kind": "track",
+                    "groups": ["M26-SE-01", "M26-SE-02"],
+                },
+                {
+                    "name": "Secure Systems and Network Engineering",
+                    "code": "SNE",
+                    "kind": "track",
+                    "groups": ["M26-SNE-01"],
                 },
                 {
                     "name": "Technological Entrepreneurship",
                     "code": "TE",
                     "kind": "track",
-                    "groups": ["M25-TE-01"],
+                    "groups": ["M26-TE-01"],
+                },
+            ],
+        }
+    ],
+    "phd": [
+        {
+            "code": "PHD_Y1",
+            "name": "PhD - Year 1",
+            "year": 1,
+            "tracks": [
+                {
+                    "name": "PhD",
+                    "code": "PHD",
+                    "kind": "track",
+                    "groups": ["PhD"],
                 },
             ],
         }
@@ -200,44 +297,93 @@ PROGRAMS: dict[str, list[dict[str, Any]]] = {
 
 
 GROUP_ESTIMATED_SIZE: dict[str, int] = {
-    "B25-CSE-01": 27,
-    "B25-CSE-02": 27,
-    "B25-CSE-03": 26,
-    "B25-CSE-04": 26,
-    "B25-CSE-05": 26,
-    "B25-DSAI-01": 26,
-    "B25-DSAI-02": 25,
-    "B25-DSAI-03": 25,
-    "B25-DSAI-04": 25,
-    "B25-DSAI-05": 25,
-    "B25-MFAI-01": 18,
-    "B25-MFAI-02": 18,
-    "B25-MFAI-03": 18,
-    "B25-MFAI-04": 18,
-    "B25-MFAI-05": 18,
-    "B25-MFAI-06": 18,
-    "B25-MFAI-07": 30,
-    "B25-RO-01": 2,
+    "B26-CSE-01": 27,
+    "B26-CSE-02": 27,
+    "B26-CSE-03": 26,
+    "B26-CSE-04": 26,
+    "B26-CSE-05": 26,
+    "B26-DSAI-01": 26,
+    "B26-DSAI-02": 25,
+    "B26-DSAI-03": 25,
+    "B26-DSAI-04": 25,
+    "B26-DSAI-05": 25,
+    "B26-DSAI-06": 25,
+    "B26-AI360-01": 18,
+    "B26-MFAI-01": 26,
+    "B26-MFAI-02": 26,
+    "B26-MFAI-03": 26,
+    "B26-MFAI-04": 26,
+    "B26-MFAI-05": 26,
+    "B26-MFAI-06": 26,
+    "B26-MFAI-07": 26,
+    "B26-RO-01": 2,
+    "B25-CSE-01": 29,
+    "B25-CSE-02": 29,
+    "B25-CSE-03": 27,
+    "B25-CSE-04": 27,
+    "B25-CSE-05": 29,
+    "B25-CSE-06": 25,
+    "B25-CSE-07": 29,
+    "B25-DSAI-01": 28,
+    "B25-DSAI-02": 27,
+    "B25-DSAI-03": 27,
+    "B25-DSAI-04": 28,
+    "B25-DSAI-05": 27,
+    "B25-AI360-01": 10,
+    "B25-MFAI-01": 24,
+    "B25-MFAI-02": 24,
+    "B25-MFAI-03": 24,
+    "B25-MFAI-04": 14,
+    "B25-RO-01": 1,
     "B24-SD-01": 30,
-    "B24-SD-02": 30,
-    "B24-SD-03": 30,
-    "B24-CBS-01": 30,
-    "B24-CBS-02": 30,
-    "B24-CBS-03": 30,
-    "B24-DS-01": 28,
-    "B24-AI-01": 30,
-    "B24-AI-02": 30,
-    "B24-AI-03": 30,
-    "B24-GD-01": 22,
-    "B24-RO-01": 10,
-    "B24-MFAI-01": 20,
-    "B24-MFAI-02": 24,
-    "B24-MFAI-03": 22,
-    "B24-MFAI-04": 14,
-    "B24-RO15-01": 1,
-    "M25-DS-01": 26,
-    "M25-TE-01": 17,
+    "B24-SD-02": 27,
+    "B24-SD-03": 25,
+    "B24-CBS-01": 27,
+    "B24-CBS-02": 26,
+    "B24-DS-01": 24,
+    "B24-DS-02": 25,
+    "B24-AI-01": 27,
+    "B24-AI-02": 24,
+    "B24-GD-01": 16,
+    "B24-RO-01": 14,
+    "M26-AIDE-01": 27,
+    "M26-RO-01": 14,
+    "M26-SE-01": 18,
+    "M26-SE-02": 17,
+    "M26-SNE-01": 21,
+    "M26-TE-01": 11,
+    "PhD": 25,
 }
+
+
+# Spring-style English layout (levels + ENG-* groups). Membership filled later.
+ENGLISH_PROGRAM: dict[str, Any] = {
+    "code": "ENGLISH_YEAR1",
+    "name": "English",
+    "kind": "english_program",
+    "tracks": [
+        {
+            "code": "AWA_I",
+            "name": "AWA-I",
+            "kind": "english_level",
+            "groups": [f"ENG-awa_i_{i}" for i in range(1, 17)],
+        },
+        {
+            "code": "EAP",
+            "name": "EAP",
+            "kind": "english_level",
+            "groups": [f"ENG-eap{i}" for i in (1, 2, 3, 4, 6, 7, 8, 9, 10, 11)],
+        },
+        {
+            "code": "FL",
+            "name": "FL",
+            "kind": "english_level",
+            "groups": [f"ENG-fl{i}" for i in range(1, 7)],
+        },
+    ],
+}
+
+ENGLISH_GROUP_ESTIMATED_SIZE = 12
 
 
 CLASS_TAG_MAP = {
@@ -266,6 +412,16 @@ DATE_WEEKDAY_NAMES = tuple(day.value for day in Weekday)
 
 SUMMER_ELECTIVE_TERM_PREFIX = "SUM26"
 
+_ENGLISH_COURSE_NAMES = frozenset(
+    {
+        "foreign language",
+        "иностранный язык",
+        "english for academic purposes i",
+        "english for academic purposes ii",
+        "english for academic purposes",
+    }
+)
+
 
 def normalize_class_tag(value: str | None) -> str:
     if value is None:
@@ -274,9 +430,16 @@ def normalize_class_tag(value: str | None) -> str:
     return CLASS_TAG_MAP.get(cleaned, cleaned.replace(" ", "_"))
 
 
+def is_english_course(lesson_name: str) -> bool:
+    lowered = lesson_name.strip().lower()
+    if lowered in _ENGLISH_COURSE_NAMES:
+        return True
+    return lowered.startswith("english for academic purposes")
+
+
 _ACADEMIC_GROUP_ID_FIXES: dict[str, str] = {
-    "M25-RO-": "M25-RO-01",
-    "M25-RO15-01": "M25-RO-01",
+    "M26-RO-": "M26-RO-01",
+    "M26-RO15-01": "M26-RO-01",
 }
 
 
@@ -307,6 +470,15 @@ def normalize_time(value: str | time | datetime) -> str:
     raise ValueError(f"Invalid time value: {value!r}")
 
 
+def normalize_meeting_end(start: str, end: str) -> str:
+    """Fix spreadsheet typo: evening pair labeled 19:20-21:00 instead of 19:20-20:50."""
+    start_n = normalize_time(start)
+    end_n = normalize_time(end)
+    if start_n == "19:20" and end_n == "21:00":
+        return "20:50"
+    return end_n
+
+
 def normalize_group_names(group_field: str | list[str] | tuple[str, ...] | None) -> list[str]:
     if group_field is None:
         return []
@@ -322,6 +494,15 @@ def normalize_group_names(group_field: str | list[str] | tuple[str, ...] | None)
 
 
 _ONLINE_ROOM_LABELS = frozenset({"online", "онлайн"})
+_STARTS_AT_RE = re.compile(
+    r"\(?((?:starts?\s+at)|(?:начало\s+в))\s+(\d{1,2}:\d{2})\)?",
+    re.IGNORECASE,
+)
+_ENDS_AT_RE = re.compile(
+    r"\(?((?:ends?\s+at)|(?:till)|(?:конец\s+в)|(?:до))\s+(\d{1,2}:\d{2})\)?",
+    re.IGNORECASE,
+)
+_RANGE_TIME_RE = re.compile(r"\(?(\d{1,2}:\d{2})-(\d{1,2}:\d{2})\)?")
 
 
 def _normalize_room_value(room: str | None) -> str:
@@ -333,6 +514,70 @@ def _normalize_room_value(room: str | None) -> str:
     if trimmed.casefold() in _ONLINE_ROOM_LABELS:
         return "ONLINE"
     return trimmed
+
+
+def _time_to_minutes(value: str) -> int:
+    hh, mm = normalize_time(value).split(":")
+    return int(hh) * 60 + int(mm)
+
+
+def _minutes_to_time(total: int) -> str:
+    total = max(0, total) % (24 * 60)
+    return f"{total // 60:02d}:{total % 60:02d}"
+
+
+def _parse_embedded_location_timing(room: str | None) -> tuple[str | None, str | None, str]:
+    """Extract start/end overrides and real room from strings like 'STARTS AT 18:00 ONLINE'."""
+    raw = str(room or "").strip()
+    if not raw:
+        return None, None, ""
+
+    rest = raw
+    starts_at: str | None = None
+    ends_at: str | None = None
+
+    if match := _RANGE_TIME_RE.search(rest):
+        starts_at = normalize_time(match.group(1))
+        ends_at = normalize_time(match.group(2))
+        rest = rest.replace(match.group(0), " ")
+
+    if match := _STARTS_AT_RE.search(rest):
+        starts_at = normalize_time(match.group(2))
+        rest = rest.replace(match.group(0), " ")
+
+    if match := _ENDS_AT_RE.search(rest):
+        ends_at = normalize_time(match.group(2))
+        rest = rest.replace(match.group(0), " ")
+
+    location = re.sub(r"\s+", " ", rest).strip(" ,;/")
+    # Only treat as embedded timing when the original room looked like a modifier blob.
+    looks_like_modifier = starts_at is not None or ends_at is not None or bool(
+        re.search(r"(starts?\s+at|начало|till|ends?\s+at|конец)", raw, re.IGNORECASE)
+    )
+    if not looks_like_modifier:
+        return None, None, _normalize_room_value(raw)
+    return starts_at, ends_at, _normalize_room_value(location)
+
+
+def _apply_embedded_location_timing(
+    *,
+    start_time: str,
+    end_time: str,
+    room: str | None,
+) -> tuple[str, str, str]:
+    starts_at, ends_at, location = _parse_embedded_location_timing(room)
+    start = normalize_time(start_time)
+    end = normalize_meeting_end(start_time, end_time)
+    if starts_at and ends_at:
+        return starts_at, ends_at, location
+    if starts_at:
+        duration = _time_to_minutes(end) - _time_to_minutes(start)
+        if duration <= 0:
+            duration = 90
+        return starts_at, _minutes_to_time(_time_to_minutes(starts_at) + duration), location
+    if ends_at:
+        return start, ends_at, location
+    return start, end, location if location or not room else _normalize_room_value(room)
 
 
 # (weekday, start_time, end_time, room, instructor_ids)
@@ -375,7 +620,7 @@ def _core_occurrence_from_row(
     entry: dict[str, Any] = {
         "date": date_value,
         "start_time": normalize_time(row["start_time"]),
-        "end_time": normalize_time(row["end_time"]),
+        "end_time": normalize_meeting_end(row["start_time"], row["end_time"]),
     }
     if room:
         entry["room"] = room
@@ -525,7 +770,7 @@ def _weekly_pattern_from_slots(
         entry: dict[str, Any] = {
             "weekday": weekday,
             "start_time": normalize_time(start_time),
-            "end_time": normalize_time(end_time),
+            "end_time": normalize_meeting_end(start_time, end_time),
         }
         if room:
             entry["room"] = room
@@ -775,9 +1020,9 @@ def _slug_code(value: str) -> str:
 
 
 def build_sections(programs: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
-    degree_by_level = {"bachelor": "bs", "master": "ms"}
+    degree_by_level = {"bachelor": "bs", "master": "ms", "phd": "phd"}
     core_programs: list[dict[str, Any]] = []
-    for level_name in ("bachelor", "master"):
+    for level_name in ("bachelor", "master", "phd"):
         for program in programs.get(level_name, []):
             tracks = []
             for track in program.get("tracks", []):
@@ -802,7 +1047,150 @@ def build_sections(programs: dict[str, list[dict[str, Any]]]) -> list[dict[str, 
                     "tracks": tracks,
                 }
             )
-    return [{"code": "core", "name": "Основные курсы", "kind": "core", "programs": core_programs}]
+    return [
+        {"code": "core", "name": "Основные курсы", "kind": "core", "programs": core_programs},
+        {
+            "code": "english",
+            "name": "Английский",
+            "kind": "english",
+            "programs": [deepcopy(ENGLISH_PROGRAM)],
+        },
+        {"code": "electives", "name": "Элективы", "kind": "electives", "programs": []},
+    ]
+
+
+def _normalize_hhmm(value: Any) -> str | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if len(text) >= 5 and text[2] == ":":
+        return text[:5]
+    return text
+
+
+def _expand_audience_tokens(tokens: list[Any], selector_map: dict[str, set[str]]) -> set[str]:
+    groups: set[str] = set()
+    for token in tokens:
+        raw = str(token or "").strip()
+        if not raw:
+            continue
+        if raw.startswith("@"):
+            groups.update(selector_map.get(raw, set()))
+            continue
+        groups.add(raw)
+    return groups
+
+
+def _collect_meeting_time_pairs(course_items: list[dict[str, Any]]) -> list[tuple[set[str], str, str]]:
+    """Return (audience_groups, start_hhmm, end_hhmm) for every placed meeting."""
+    pairs: list[tuple[set[str], str, str]] = []
+    for course in course_items:
+        for component in course.get("components") or []:
+            component_groups = [str(g) for g in (component.get("student_groups") or []) if str(g).strip()]
+            for session in component.get("sessions") or []:
+                audience = [str(a) for a in (session.get("audience") or []) if str(a).strip()]
+                tokens = audience or component_groups
+                for slot in session.get("weekly_pattern") or []:
+                    start = _normalize_hhmm(slot.get("start_time"))
+                    end = _normalize_hhmm(slot.get("end_time"))
+                    if start and end:
+                        pairs.append((set(tokens), start, normalize_meeting_end(start, end)))
+                for occurrence in session.get("occurrences") or []:
+                    start = _normalize_hhmm(occurrence.get("start_time"))
+                    end = _normalize_hhmm(occurrence.get("end_time"))
+                    if start and end:
+                        pairs.append((set(tokens), start, normalize_meeting_end(start, end)))
+    return pairs
+
+
+def program_time_slots_subset_of_term(pairs: list[tuple[str, str]] | set[tuple[str, str]]) -> bool:
+    """True when every program slot start is one of the term time_slots starts."""
+    if not pairs:
+        return True
+    return all(start in TERM_TIME_SLOT_STARTS for start, _end in pairs)
+
+
+def attach_program_time_slots(
+    sections: list[dict[str, Any]],
+    course_items: list[dict[str, Any]],
+    selector_map: dict[str, set[str]],
+) -> list[dict[str, Any]]:
+    """Set each program's time_slots from distinct meeting start/end pairs that touch it.
+
+    Skips programs whose collected slots are a subset of term.time_slots (by start).
+    """
+    program_groups: dict[str, set[str]] = {}
+    for section in sections:
+        for program in section.get("programs") or []:
+            code = str(program.get("code") or "").strip()
+            if not code:
+                continue
+            groups: set[str] = set()
+            for group in program.get("groups") or []:
+                gid = _group_entry_code(group)
+                if gid:
+                    groups.add(gid)
+            for track in program.get("tracks") or []:
+                for group in track.get("groups") or []:
+                    gid = _group_entry_code(group)
+                    if gid:
+                        groups.add(gid)
+            # Also accept explicit selector map entries for this program.
+            groups.update(selector_map.get(f"@{code}", set()))
+            program_groups[code] = groups
+
+    slots_by_program: dict[str, set[tuple[str, str]]] = {code: set() for code in program_groups}
+    for tokens, start, end in _collect_meeting_time_pairs(course_items):
+        expanded = _expand_audience_tokens(list(tokens), selector_map)
+        # Direct @PROGRAM / @PROGRAM/TRACK tokens also map via expansion.
+        for code, groups in program_groups.items():
+            if not groups:
+                continue
+            if expanded & groups:
+                slots_by_program[code].add((start, end))
+                continue
+            # Audience may still be unresolved selectors for this program.
+            if any(str(token).startswith(f"@{code}") for token in tokens):
+                slots_by_program[code].add((start, end))
+
+    updated = deepcopy(sections)
+    for section in updated:
+        for program in section.get("programs") or []:
+            code = str(program.get("code") or "").strip()
+            pairs = sorted(slots_by_program.get(code) or [])
+            if not pairs:
+                program.pop("time_slots", None)
+                continue
+            if program_time_slots_subset_of_term(pairs):
+                program.pop("time_slots", None)
+                continue
+            program["time_slots"] = [
+                {"start_time": start, "end_time": end} for start, end in pairs
+            ]
+    return updated
+
+
+def collect_english_groups(english_program: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    program = english_program or ENGLISH_PROGRAM
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for track in program.get("tracks", []):
+        track_name = str(track.get("name") or track.get("code") or "English")
+        for index, group in enumerate(track.get("groups", []), start=1):
+            gid = _group_entry_code(group)
+            if not gid or gid in seen:
+                continue
+            seen.add(gid)
+            out.append(
+                {
+                    "code": gid,
+                    "kind": "english",
+                    "name": f"{track_name} {index}",
+                    "estimated_size": ENGLISH_GROUP_ESTIMATED_SIZE,
+                    "students": [],
+                }
+            )
+    return out
 
 
 def build_students_groups(academic_groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -998,15 +1386,26 @@ def _elective_sessions_from_lessons(
             occ_date = occurrence.get("date")
             if not occ_date:
                 continue
+            start_time, end_time, room = _apply_embedded_location_timing(
+                start_time=str(occurrence.get("start_time") or "00:00"),
+                end_time=str(occurrence.get("end_time") or occurrence.get("start_time") or "00:00"),
+                room=occurrence.get("room"),
+            )
             key = (
                 str(occ_date),
-                str(occurrence.get("start_time") or ""),
-                str(occurrence.get("end_time") or ""),
-                occurrence.get("room"),
+                start_time,
+                end_time,
+                room or None,
                 occurrence.get("a1_range"),
             )
+            cleaned = {
+                **occurrence,
+                "start_time": start_time,
+                "end_time": end_time,
+                "room": room or None,
+            }
             if key not in entries_by_key:
-                entries_by_key[key] = (occurrence, teacher_ids)
+                entries_by_key[key] = (cleaned, teacher_ids)
 
     sorted_entries = sorted(
         entries_by_key.values(),
@@ -1019,8 +1418,8 @@ def _elective_sessions_from_lessons(
     for occurrence, teacher_ids in sorted_entries:
         entry: dict[str, Any] = {
             "date": str(occurrence["date"]),
-            "start_time": str(occurrence.get("start_time") or "00:00"),
-            "end_time": str(occurrence.get("end_time") or occurrence.get("start_time") or "00:00"),
+            "start_time": str(occurrence["start_time"]),
+            "end_time": str(occurrence["end_time"]),
         }
         room = _normalize_room_value(occurrence.get("room"))
         if room:
@@ -1049,7 +1448,6 @@ def _elective_component_from_lessons(
 ) -> dict[str, Any] | None:
     if not lessons or not student_groups:
         return None
-    duration_slots = max(_elective_duration_slots(lesson) for lesson in lessons)
     teacher_signatures = [
         tuple(
             sorted(
@@ -1062,16 +1460,13 @@ def _elective_component_from_lessons(
     representative = lessons[0]
     sessions = _elective_sessions_from_lessons(lessons, student_groups, instructors_map, registry)
     meeting_count = len(sessions[0]["occurrences"]) if sessions else 0
-    cls: dict[str, Any] = {
+    return {
         "tag": _elective_component_tag(representative, shared_for_parallel_groups=shared_for_parallel_groups),
         "student_groups": student_groups,
         "per_semester": meeting_count or max(len(lesson.get("occurrences") or []) for lesson in lessons),
         "instructor_pool": _elective_instructor_pool(teacher_signatures),
         "sessions": sessions,
     }
-    if duration_slots != 1:
-        cls["duration_slots"] = duration_slots
-    return cls
 
 
 def _group_elective_lessons_by_course(
@@ -1287,21 +1682,6 @@ def load_core_courses_file(path: Path) -> list[dict[str, Any]]:
     return expand_grouped_core_courses_to_rows(payload)
 
 
-def _elective_duration_slots(lesson: dict[str, Any]) -> int:
-    max_slots = 1
-    for occurrence in lesson.get("occurrences") or []:
-        start_raw = occurrence.get("start_time")
-        end_raw = occurrence.get("end_time")
-        if not start_raw or not end_raw:
-            continue
-        delta = datetime.strptime(normalize_time(end_raw), "%H:%M") - datetime.strptime(
-            normalize_time(start_raw), "%H:%M"
-        )
-        duration_minutes = abs(int(delta.total_seconds())) // 60
-        max_slots = max(max_slots, max(1, round(duration_minutes / 90)))
-    return max_slots
-
-
 def _elective_instructor_pool(teacher_id_sets: list[tuple[str, ...]]) -> list[str] | list[list[str]]:
     unique_signatures = sorted({sig for sig in teacher_id_sets if sig})
     if not unique_signatures:
@@ -1447,15 +1827,17 @@ def main() -> None:
 
     academic_groups = collect_academic_groups(PROGRAMS)
     elective_alias_by_subject = load_elective_alias_by_subject(search_dirs)
-    summer_elective_student_groups = collect_elective_student_groups(
+    elective_student_groups = collect_elective_student_groups(
         grouped_elective_lessons,
         alias_by_subject=elective_alias_by_subject,
     )
-    summer_elective_group_ids = [str(group["code"]) for group in summer_elective_student_groups if group.get("code")]
+    elective_group_ids = [str(group["code"]) for group in elective_student_groups if group.get("code")]
     sections = build_sections(PROGRAMS)
-    sections = append_summer_electives_to_sections(sections, summer_elective_group_ids)
+    if elective_group_ids:
+        sections = append_summer_electives_to_sections(sections, elective_group_ids)
     students_groups = build_students_groups(academic_groups)
-    students_groups.extend(summer_elective_student_groups)
+    students_groups.extend(collect_english_groups())
+    students_groups.extend(elective_student_groups)
 
     instructors_map: dict[str, InstructorConfig] = {}
     aggregated: dict[PatternKey, dict[str, Any]] = {}
@@ -1463,6 +1845,9 @@ def main() -> None:
     for r in rows:
         course = normalize_lesson_name(r["lesson_name"])
         if course.strip().lower() in {"group meeting with administration"}:
+            continue
+        if is_english_course(course):
+            # English stays in its own section; ENG remapping is not ready yet.
             continue
         teacher_names = split_teacher_names(r["teacher"])
         teacher_signature = tuple(
@@ -1477,7 +1862,6 @@ def main() -> None:
                 "slots_by_signature": defaultdict(lambda: defaultdict(set)),
                 "occurrences_by_signature": defaultdict(lambda: defaultdict(list)),
                 "edits_by_slot": defaultdict(list),
-                "duration_slots": 1,
                 "slots_by_group": defaultdict(set),
                 "shared_group_batches": set(),
             }
@@ -1518,11 +1902,6 @@ def main() -> None:
                 aggregated[key]["slots_by_group"][group_id].add(slot_sig)
                 aggregated[key]["slots_by_signature"][teacher_signature][group_id].add(slot_sig)
 
-        duration_minutes = (
-            datetime.strptime(normalize_time(r["end_time"]), "%H:%M")
-            - datetime.strptime(normalize_time(r["start_time"]), "%H:%M")
-        ).seconds // 60
-        aggregated[key]["duration_slots"] = max(aggregated[key]["duration_slots"], 1, round(duration_minutes / 90))
     selector_map = build_group_selectors(PROGRAMS)
     group_order = build_group_order_from_sections(sections)
 
@@ -1532,6 +1911,7 @@ def main() -> None:
             for row in selected_rows
             if normalize_lesson_name(row["lesson_name"]).strip().lower()
             not in {"group meeting with administration"}
+            and not is_english_course(normalize_lesson_name(row["lesson_name"]))
         }
 
         courses_map: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -1596,8 +1976,6 @@ def main() -> None:
                 per_week = max((len(slots) for slots in slots_source.values()), default=1)
                 if per_week != 1:
                     cls["per_week"] = per_week
-                if data["duration_slots"] != 1:
-                    cls["duration_slots"] = data["duration_slots"]
                 cls["instructor_pool"] = _build_instructor_pool(signatures_for_pool)
                 is_shared_lesson = frozenset(groups_for_cls) in data.get("shared_group_batches", set())
                 if infer_per_group(
@@ -1642,6 +2020,17 @@ def main() -> None:
         scheduled_instructor_ids: set[str] = set()
         for components in courses_map.values():
             scheduled_instructor_ids.update(_collect_instructor_ids_from_components(components))
+
+        # Final cross-script / spelling-variant merge + rewrite refs in courses.
+        id_redirect = collapse_duplicate_instructors(instructors_map)
+        if any(old != new for old, new in id_redirect.items()):
+            for course_name, components in list(courses_map.items()):
+                courses_map[course_name] = remap_instructor_ids_in_obj(components, id_redirect)
+            scheduled_instructor_ids = {
+                id_redirect.get(instructor_id, instructor_id)
+                for instructor_id in scheduled_instructor_ids
+            }
+
         instructors = _build_output_instructors(instructors_map, instructor_registry, scheduled_instructor_ids)
 
         course_entries: list[tuple[bool, str, dict[str, Any]]] = []
@@ -1679,6 +2068,8 @@ def main() -> None:
             )
         ]
 
+        sections_with_slots = attach_program_time_slots(sections, course_items, selector_map)
+
         return {
             "term": {
                 "name": TERM_NAME,
@@ -1686,7 +2077,7 @@ def main() -> None:
             },
             "rooms": rooms,
             "instructors": instructors,
-            "sections": sections,
+            "sections": sections_with_slots,
             "students_groups": students_groups,
             "courses": course_items,
         }
