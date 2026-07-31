@@ -107,12 +107,6 @@ PROGRAMS: dict[str, list[dict[str, Any]]] = {
             "year": 1,
             "tracks": [
                 {
-                    "name": "AI360",
-                    "code": "AI360",
-                    "kind": "track",
-                    "groups": ["B26-AI360-01"],
-                },
-                {
                     "name": "MFAI",
                     "code": "MFAI",
                     "kind": "track",
@@ -131,6 +125,12 @@ PROGRAMS: dict[str, list[dict[str, Any]]] = {
                     "code": "RO",
                     "kind": "track",
                     "groups": ["B26-RO-01"],
+                },
+                {
+                    "name": "AI360",
+                    "code": "AI360",
+                    "kind": "track",
+                    "groups": ["B26-AI360-01"],
                 },
             ],
         },
@@ -175,12 +175,6 @@ PROGRAMS: dict[str, list[dict[str, Any]]] = {
             "year": 2,
             "tracks": [
                 {
-                    "name": "AI360",
-                    "code": "AI360",
-                    "kind": "track",
-                    "groups": ["B25-AI360-01"],
-                },
-                {
                     "name": "MFAI",
                     "code": "MFAI",
                     "kind": "track",
@@ -191,6 +185,12 @@ PROGRAMS: dict[str, list[dict[str, Any]]] = {
                     "code": "RO",
                     "kind": "track",
                     "groups": ["B25-RO-01"],
+                },
+                {
+                    "name": "AI360",
+                    "code": "AI360",
+                    "kind": "track",
+                    "groups": ["B25-AI360-01"],
                 },
             ],
         },
@@ -333,7 +333,7 @@ GROUP_ESTIMATED_SIZE: dict[str, int] = {
     "B25-MFAI-01": 24,
     "B25-MFAI-02": 24,
     "B25-MFAI-03": 24,
-    "B25-MFAI-04": 14,
+    "B25-MFAI-04": 16,
     "B25-RO-01": 1,
     "B24-SD-01": 30,
     "B24-SD-02": 27,
@@ -806,51 +806,83 @@ def _core_sessions_from_slots(
     occurrences_by_signature: dict[tuple[str, ...], dict[str, list[dict[str, Any]]]] | None = None,
     signatures_for_pool: list[tuple[str, ...]] | None = None,
     edits_by_slot: dict[WeeklySlotSig, list[dict[str, Any]]] | None = None,
+    selector_map: dict[str, set[str]] | None = None,
+    group_order: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
+    del per_group  # sessions always follow spreadsheet slot audiences; flag stays on component
     signatures = signatures_for_pool or [()]
-    if per_group:
-        result: list[dict[str, Any]] = []
-        for group_id in sorted(groups_for_cls):
-            slots = slots_source.get(group_id, set())
-            occurrences = _occurrences_for_variant(signatures, [group_id], occurrences_by_signature or {})
-            if slots:
-                result.append(
-                    {
-                        "audience": [group_id],
-                        "weekly_pattern": _weekly_pattern_from_slots(slots, edits_by_slot),
-                    }
-                )
-            if occurrences:
-                result.append(
-                    {
-                        "audience": [group_id],
-                        "occurrences": occurrences,
-                    }
-                )
-        return result
 
-    all_slots: set[WeeklySlotSig] = set()
+    def _audience_tokens(group_ids: list[str]) -> list[str]:
+        ordered = [gid for gid in groups_for_cls if gid in group_ids]
+        if selector_map is not None and group_order is not None:
+            return compress_groups_to_selectors(ordered, selector_map, group_order)
+        return ordered
+
+    # One session per slot-audience: groups that share a concrete weekly slot stay together
+    # (merged spreadsheet cells), even when the component is marked per_group.
+    slot_to_groups: dict[WeeklySlotSig, set[str]] = defaultdict(set)
     for group_id in groups_for_cls:
-        all_slots.update(slots_source.get(group_id, set()))
-    occurrences = _occurrences_for_variant(signatures, groups_for_cls, occurrences_by_signature or {})
-    if not all_slots and not occurrences:
-        return []
+        for slot in slots_source.get(group_id, set()):
+            slot_to_groups[slot].add(group_id)
 
-    result = []
-    if all_slots:
+    slots_by_audience: dict[frozenset[str], set[WeeklySlotSig]] = defaultdict(set)
+    for slot, group_ids in slot_to_groups.items():
+        slots_by_audience[frozenset(group_ids)].add(slot)
+
+    result: list[dict[str, Any]] = []
+    for audience_groups, slots in sorted(
+        slots_by_audience.items(),
+        key=lambda item: (
+            min((groups_for_cls.index(gid) for gid in item[0] if gid in groups_for_cls), default=10**9),
+            len(item[0]),
+            tuple(sorted(item[0])),
+        ),
+    ):
         result.append(
             {
-                "audience": list(student_groups),
-                "weekly_pattern": _weekly_pattern_from_slots(all_slots, edits_by_slot),
+                "audience": _audience_tokens(sorted(audience_groups)),
+                "weekly_pattern": _weekly_pattern_from_slots(slots, edits_by_slot),
             }
         )
-    if occurrences:
-        result.append(
-            {
-                "audience": list(student_groups),
-                "occurrences": occurrences,
-            }
-        )
+
+    occurrence_groups = [
+        group_id
+        for group_id in groups_for_cls
+        if _occurrences_for_variant(signatures, [group_id], occurrences_by_signature or {})
+    ]
+    if occurrence_groups:
+        occ_by_group = {
+            group_id: _occurrences_for_variant(signatures, [group_id], occurrences_by_signature or {})
+            for group_id in occurrence_groups
+        }
+        clusters: dict[tuple[tuple[str, ...], ...], list[str]] = defaultdict(list)
+
+        def _occ_fingerprint(items: list[dict[str, Any]]) -> tuple[tuple[str, ...], ...]:
+            return tuple(
+                sorted(
+                    (
+                        str(item.get("date") or ""),
+                        str(item.get("start_time") or ""),
+                        str(item.get("end_time") or ""),
+                        str(item.get("room") or ""),
+                        json.dumps(item.get("instructor"), ensure_ascii=False, sort_keys=True),
+                    )
+                    for item in items
+                )
+            )
+
+        for group_id, items in occ_by_group.items():
+            clusters[_occ_fingerprint(items)].append(group_id)
+        for group_ids in clusters.values():
+            result.append(
+                {
+                    "audience": _audience_tokens(group_ids),
+                    "occurrences": occ_by_group[group_ids[0]],
+                }
+            )
+
+    if not result and student_groups:
+        return []
     return result
 
 
@@ -1993,6 +2025,8 @@ def main() -> None:
                     occurrences_by_signature=data["occurrences_by_signature"],
                     signatures_for_pool=signatures_for_pool,
                     edits_by_slot=data["edits_by_slot"],
+                    selector_map=selector_map,
+                    group_order=group_order,
                 )
                 if sessions:
                     cls["sessions"] = sessions
