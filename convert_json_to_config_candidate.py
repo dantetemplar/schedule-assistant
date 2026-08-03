@@ -36,6 +36,61 @@ TERM_TIME_SLOTS: list[tuple[str, str]] = [
 ]
 TERM_TIME_SLOT_STARTS = {start for start, _ in TERM_TIME_SLOTS}
 
+DEFAULT_INSTRUCTOR_POSITIONS = [
+    "Full Professor",
+    "Associate Professor",
+    "Assistant Professor",
+    "Senior Instructor",
+    "Instructor",
+    "Teaching Assistant",
+    "Teaching Assistant Intern",
+    "Visiting",
+]
+
+DEFAULT_COURSE_INSTRUCTOR_ROLES = [
+    "Primary Instructor",
+    "Secondary Instructor",
+    "Teaching Assistant",
+]
+
+DEFAULT_COURSE_COMPONENT_TAGS = [
+    "lec",
+    "tut",
+    "lab",
+    "class",
+]
+
+# Roster title aliases → canonical position (case-insensitive match).
+POSITION_ALIASES: dict[str, str] = {
+    "professor": "Full Professor",
+    "full professor": "Full Professor",
+    "docent": "Associate Professor",
+    "associate professor": "Associate Professor",
+    "professor docent": "Associate Professor",
+    "assistant professor": "Assistant Professor",
+    "senior instructor": "Senior Instructor",
+    "instructor": "Instructor",
+    "visiting": "Visiting",
+    # IU HR "assistant" / "TA" → Teaching Assistant (not Assistant Professor).
+    "assistant": "Teaching Assistant",
+    "ta": "Teaching Assistant",
+    "teacher assistant": "Teaching Assistant",
+    "teaching assistant": "Teaching Assistant",
+    "ta intern": "Teaching Assistant Intern",
+    "teacher assistant intern": "Teaching Assistant Intern",
+    "teaching assistant intern": "Teaching Assistant Intern",
+}
+
+# Component tag → subject role; lower rank wins when an instructor teaches several tags.
+COURSE_ROLE_BY_COMPONENT_TAG: dict[str, tuple[int, str]] = {
+    "lec": (0, "Primary Instructor"),
+    "lecture": (0, "Primary Instructor"),
+    "tut": (1, "Secondary Instructor"),
+    "tutorial": (1, "Secondary Instructor"),
+    "lab": (2, "Teaching Assistant"),
+    "laboratory": (2, "Teaching Assistant"),
+}
+
 EXCLUDED_ROOM_IDS = {
     "1.1",
     "1.3",
@@ -55,6 +110,64 @@ EXCLUDED_ROOM_IDS = {
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_CORE_COURSES_YAML = Path("core-courses-lessons-fall-2026.yaml")
 DEFAULT_ELECTIVES_YAML = Path("electives-lessons-fall-2026.yaml")
+
+def _normalize_instructor_position(position: str | None) -> str | None:
+    raw = (position or "").strip()
+    if not raw or raw in {"?", "-"}:
+        return None
+    canonical = POSITION_ALIASES.get(raw.casefold())
+    if canonical is not None:
+        return canonical
+    if raw in DEFAULT_INSTRUCTOR_POSITIONS:
+        return raw
+    return None
+
+
+def _iter_pool_instructor_ids(pool: list[Any]) -> list[str]:
+    ids: list[str] = []
+    for item in pool:
+        if isinstance(item, str) and item.strip():
+            ids.append(item.strip())
+        elif isinstance(item, list):
+            for nested in item:
+                if isinstance(nested, str) and nested.strip():
+                    ids.append(nested.strip())
+    return ids
+
+
+def _derive_course_instructors(components: list[dict[str, Any]]) -> list[dict[str, str]]:
+    best_by_id: dict[str, tuple[int, str]] = {}
+    for component in components:
+        tag = str(component.get("tag") or "").strip().casefold()
+        role_info = COURSE_ROLE_BY_COMPONENT_TAG.get(tag)
+        if role_info is None:
+            continue
+        rank, role = role_info
+        for instructor_id in _iter_pool_instructor_ids(list(component.get("instructor_pool") or [])):
+            current = best_by_id.get(instructor_id)
+            if current is None or rank < current[0]:
+                best_by_id[instructor_id] = (rank, role)
+    return [
+        {"id": instructor_id, "role": role}
+        for instructor_id, (_rank, role) in sorted(
+            best_by_id.items(),
+            key=lambda item: (item[1][0], item[0].casefold()),
+        )
+    ]
+
+
+def _normalize_output_instructors(instructors: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for instructor in instructors:
+        entry = dict(instructor)
+        position = _normalize_instructor_position(entry.get("position"))
+        if position:
+            entry["position"] = position
+        else:
+            entry.pop("position", None)
+        normalized.append(entry)
+    return normalized
+
 
 def _group_entry_code(entry: Any) -> str:
     if isinstance(entry, str):
@@ -2075,8 +2188,10 @@ def main() -> None:
                 short_name = course_short_names.get(course_name)
                 if short_name:
                     course_payload["short_name"] = short_name
-            course_payload["course_tags"] = ["elective"] if is_elective_course else ["core_course"]
             course_payload["components"] = components
+            course_instructors = _derive_course_instructors(components)
+            if course_instructors:
+                course_payload["instructors"] = course_instructors
             course_entries.append(
                 (
                     is_elective_course,
@@ -2104,10 +2219,14 @@ def main() -> None:
 
         sections_with_slots = attach_program_time_slots(sections, course_items, selector_map)
 
+        instructors = _normalize_output_instructors(instructors)
         return {
             "term": {
                 "name": TERM_NAME,
                 "semester": {"start_date": TERM_START.isoformat(), "end_date": TERM_END.isoformat()},
+                "instructor_positions": list(DEFAULT_INSTRUCTOR_POSITIONS),
+                "course_instructor_roles": list(DEFAULT_COURSE_INSTRUCTOR_ROLES),
+                "course_component_tags": list(DEFAULT_COURSE_COMPONENT_TAGS),
             },
             "rooms": rooms,
             "instructors": instructors,

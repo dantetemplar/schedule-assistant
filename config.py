@@ -71,6 +71,12 @@ class TermConfig(SettingBaseModel):
         TermTimeSlot(start_time=datetime.time(19, 20), end_time=datetime.time(20, 50)),
     ]
     "Teaching slots for the term"
+    instructor_positions: list[str] = []
+    "Allowed instructor.position values (staff titles); empty means unrestricted"
+    course_instructor_roles: list[str] = []
+    "Allowed course.instructors[].role values (subject roles); empty means unrestricted"
+    course_component_tags: list[str] = []
+    "Allowed course.components[].tag values; empty means unrestricted"
 
 
 class RoomConfig(SettingBaseModel):
@@ -94,7 +100,7 @@ class InstructorConfig(SettingBaseModel):
     alias: str | None = None
     "Short handle or Telegram-style alias from staff roster"
     position: str | None = None
-    "Staff position from roster (for example, Professor, Visiting)"
+    "Staff position from roster (for example, Full Professor, Visiting)"
 
 
 class InstructorsConfig(SettingBaseModel):
@@ -166,7 +172,6 @@ class StudentsGroups(SettingBaseModel):
     "Optional explicit student membership list"
 
 
-type CommonCourseTags = Literal["core_course", "elective", "english"]
 type CommonCourseClassTags = Literal["lec", "tut", "lab", "class"]
 
 
@@ -277,6 +282,12 @@ class CourseConfig(SettingBaseModel):
         sessions: list[ComponentSessionSeries] | None = None
         "Concrete placed sessions when known (for example, summer electives from spreadsheet dates)"
 
+    class CourseInstructor(SettingBaseModel):
+        id: str
+        "Instructor id from the global instructors list"
+        role: str
+        "Subject role (for example, Primary Instructor, Secondary Instructor, Teaching Assistant)"
+
     name: str
     "Course name"
     short_name: str | None = None
@@ -285,8 +296,8 @@ class CourseConfig(SettingBaseModel):
     "Russian display name"
     short_name_ru: str | None = None
     "Short Russian display name"
-    course_tags: list[CommonCourseTags | str] = []
-    "Course tags (for example, core_course / elective / english)"
+    instructors: list[CourseInstructor] = []
+    "Subject-level staff with roles; preferred in event instructor pickers"
     components: list[Component]
     "Course subparts (lec/tut/lab/…) to schedule"
 

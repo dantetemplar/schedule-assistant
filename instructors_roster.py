@@ -16,6 +16,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 EMAIL_PATTERN = re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}")
 
 USERS_CSV_DEFAULT_NAMES = (
+    "2024-26.ProjectionFaculty - People.25-26 (1) (2).csv",
     "Руслану для плагина - People.25-26.csv",
     "exportUsers_2026-4-14.csv",
 )
@@ -27,16 +28,49 @@ def normalize_person_name(name: str) -> str:
     return " ".join(name.split()).casefold()
 
 
+def _email_domain_rank(email: str) -> int:
+    lowered = email.casefold()
+    if lowered.endswith("@innopolis.university"):
+        return 0
+    if lowered.endswith("@innopolis.ru"):
+        return 1
+    if "@innopolis." in lowered:
+        return 2
+    return 10
+
+
+def extract_emails(raw: str | None) -> list[str]:
+    if not raw:
+        return []
+    emails: list[str] = []
+    seen: set[str] = set()
+    for match in EMAIL_PATTERN.findall(str(raw)):
+        if "#EXT#" in match.upper():
+            continue
+        email = match.lower()
+        if email in seen:
+            continue
+        seen.add(email)
+        emails.append(email)
+    return emails
+
+
+def pick_primary_email(raw: str | None) -> str | None:
+    """Pick one email from a cell that may list several (prefer Innopolis domains)."""
+    emails = extract_emails(raw)
+    if not emails:
+        return None
+    return sorted(emails, key=lambda email: (_email_domain_rank(email), email))[0]
+
+
 def _row_primary_email(row: dict[str, str]) -> str | None:
     upn = str(row.get("userPrincipalName") or "").strip()
     if upn and "@" in upn and "#EXT#" not in upn.upper():
-        return upn.lower()
-    for match in EMAIL_PATTERN.findall(str(row.get("otherMails") or "")):
-        if "#EXT#" not in match.upper():
-            return match.lower()
-    for match in EMAIL_PATTERN.findall(str(row.get("imAddresses") or "")):
-        if "#EXT#" not in match.upper():
-            return match.lower()
+        return pick_primary_email(upn) or upn.lower()
+    for field in ("otherMails", "imAddresses"):
+        primary = pick_primary_email(str(row.get(field) or ""))
+        if primary:
+            return primary
     return None
 
 
@@ -293,8 +327,15 @@ class PeopleEntry:
     name_en: str
     name_ru: str | None = None
     email: str | None = None
+    emails: list[str] | None = None
     alias: str | None = None
     position: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.emails is None:
+            self.emails = extract_emails(self.email) if self.email else []
+        if self.email is None and self.emails:
+            self.email = pick_primary_email(", ".join(self.emails))
 
 
 @dataclass
@@ -311,8 +352,14 @@ class InstructorProfile:
 
     def merge(self, other: InstructorProfile) -> None:
         if other.email:
-            self.email = other.email
-            self.id = other.email
+            primary = pick_primary_email(other.email) or other.email
+            # Prefer Innopolis corporate email when merging conflicting addresses.
+            if not self.email or _email_domain_rank(primary) < _email_domain_rank(self.email):
+                self.email = primary
+                self.id = primary
+            elif "," in (self.email or "") or "," in (self.id or ""):
+                self.email = pick_primary_email(self.email) or self.email
+                self.id = self.email or self.id
         if other.name_en and not self.name_en:
             self.name_en = other.name_en
         if other.name_ru:
@@ -323,6 +370,11 @@ class InstructorProfile:
             self.alias = other.alias
         if other.position and not self.position:
             self.position = other.position
+        if self.email:
+            primary = pick_primary_email(self.email) or self.email
+            self.email = primary
+            if "@" in self.id or "," in self.id:
+                self.id = primary
         if not self.email:
             self.id = to_instructor_id(self.name_en or self.name_ru or self.id)
 
@@ -341,16 +393,35 @@ class InstructorProfile:
         return InstructorConfig.model_validate(payload)
 
 
+def _header_index(header: list[str], *names: str) -> int:
+    lowered = {cell.strip().casefold(): idx for idx, cell in enumerate(header)}
+    for name in names:
+        idx = lowered.get(name.casefold())
+        if idx is not None:
+            return idx
+    return -1
+
+
 def _people_csv_column_indices(header: list[str]) -> dict[str, int]:
-    shtat_idx = next((idx for idx, cell in enumerate(header) if cell.strip().startswith("ШТАТ")), 1)
-    name_en_idx = max(0, shtat_idx - 1)
+    name_en_idx = _header_index(header, "English Name")
+    name_ru_idx = _header_index(header, "Russian Name")
+    if name_en_idx < 0 or name_ru_idx < 0:
+        shtat_idx = next(
+            (idx for idx, cell in enumerate(header) if cell.strip().startswith("ШТАТ")),
+            1,
+        )
+        name_en_idx = max(0, shtat_idx - 1)
+        name_ru_idx = shtat_idx
+    email_idx = _header_index(header, "Email")
+    if email_idx < 0:
+        raise ValueError("People CSV header is missing Email column")
     return {
         "name_en": name_en_idx,
-        "name_ru": shtat_idx,
-        "email": header.index("Email"),
-        "position": header.index("Position") if "Position" in header else -1,
-        "alias": header.index("Alias") if "Alias" in header else -1,
-        "student": header.index("Student?") if "Student?" in header else 4,
+        "name_ru": name_ru_idx,
+        "email": email_idx,
+        "position": _header_index(header, "Position"),
+        "alias": _header_index(header, "Alias"),
+        "student": _header_index(header, "Student?", "IsStudent"),
     }
 
 
@@ -381,6 +452,8 @@ class PeopleCatalog:
                 self._by_name[key] = entry
         if entry.email:
             self._by_email[entry.email.lower()] = entry
+        for email in entry.emails or []:
+            self._by_email[email.lower()] = entry
         if entry.alias:
             self._by_alias[entry.alias.lstrip("@").casefold()] = entry
 
@@ -400,22 +473,28 @@ class PeopleCatalog:
         student_idx = columns["student"]
         name_en_idx = columns["name_en"]
         name_ru_idx = columns["name_ru"]
+        required_idx = max(email_idx, name_en_idx, name_ru_idx)
         for row in rows[header_idx + 1 :]:
             if not _is_people_data_row(row, columns):
                 continue
-            if len(row) <= max(email_idx, student_idx, name_ru_idx):
+            if len(row) <= required_idx:
                 continue
-            if str(row[student_idx] if student_idx < len(row) else "").strip().casefold() == "yes":
+            if (
+                student_idx >= 0
+                and student_idx < len(row)
+                and str(row[student_idx] or "").strip().casefold() == "yes"
+            ):
                 continue
             name_en = str(row[name_en_idx] or "").strip()
             name_ru_raw = str(row[name_ru_idx] or "").strip()
-            name_ru = name_ru_raw or None
-            email_raw = str(row[email_idx] or "").strip().lower()
-            email = email_raw if "@" in email_raw and "#EXT#" not in email_raw.upper() else None
+            name_ru = name_ru_raw if name_ru_raw and _has_cyrillic(name_ru_raw) else None
+            email_raw = str(row[email_idx] or "").strip()
+            emails = extract_emails(email_raw)
+            email = pick_primary_email(email_raw)
             alias_raw = (
                 str(row[alias_idx] or "").strip() if alias_idx >= 0 and alias_idx < len(row) else ""
             )
-            alias = alias_raw if alias_raw else None
+            alias = alias_raw if alias_raw and alias_raw != "[не использует]" else None
             position_raw = (
                 str(row[position_idx] or "").strip() if position_idx >= 0 and position_idx < len(row) else ""
             )
@@ -423,8 +502,9 @@ class PeopleCatalog:
             self._register(
                 PeopleEntry(
                     name_en=name_en,
-                    name_ru=name_ru or None,
+                    name_ru=name_ru,
                     email=email,
+                    emails=emails,
                     alias=alias,
                     position=position,
                 )
@@ -435,6 +515,15 @@ class PeopleCatalog:
         if not cleaned:
             return None
         if "@" in cleaned:
+            primary = pick_primary_email(cleaned)
+            if primary:
+                by_email = self._by_email.get(primary)
+                if by_email:
+                    return by_email
+            for email in extract_emails(cleaned):
+                by_email = self._by_email.get(email)
+                if by_email:
+                    return by_email
             by_email = self._by_email.get(cleaned.lower())
             if by_email:
                 return by_email
@@ -488,10 +577,18 @@ def resolve_users_csv_paths(explicit: Path | None, *search_dirs: Path) -> list[P
                 return [candidate]
         return [explicit]
     found: list[Path] = []
+    people_csv: Path | None = None
     for name in USERS_CSV_DEFAULT_NAMES:
         for directory in dirs:
             candidate = directory / name
-            if candidate.exists() and candidate not in found:
+            if not candidate.exists() or candidate in found:
+                continue
+            if _is_export_users_csv(candidate):
+                found.append(candidate)
+                continue
+            # Prefer the first People sheet in USERS_CSV_DEFAULT_NAMES order.
+            if people_csv is None:
+                people_csv = candidate
                 found.append(candidate)
     return found
 
@@ -626,12 +723,18 @@ def instructor_config_to_profile(instructor: InstructorConfig) -> InstructorProf
 
 
 def _prefer_canonical_id(left: InstructorConfig, right: InstructorConfig) -> str:
-    if left.email and not right.email:
-        return left.id
-    if right.email and not left.email:
-        return right.id
-    if left.email and right.email:
+    left_email = pick_primary_email(left.email or left.id) if (left.email or "@" in left.id) else None
+    right_email = pick_primary_email(right.email or right.id) if (right.email or "@" in right.id) else None
+    if left_email and right_email:
+        left_rank = _email_domain_rank(left_email)
+        right_rank = _email_domain_rank(right_email)
+        if left_rank != right_rank:
+            return left.id if left_rank < right_rank else right.id
         return left.id if left.email == left.id else right.id if right.email == right.id else left.id
+    if left_email and not right_email:
+        return left.id
+    if right_email and not left_email:
+        return right.id
     if left.name_en and not right.name_en:
         return left.id
     if right.name_en and not left.name_en:
@@ -645,6 +748,16 @@ def _prefer_canonical_id(left: InstructorConfig, right: InstructorConfig) -> str
         return right.id
     return left.id
 
+
+def normalize_instructor_config(instructor: InstructorConfig) -> InstructorConfig:
+    """Collapse multi-email id/email cells to a single preferred corporate address."""
+    primary = pick_primary_email(instructor.email) or pick_primary_email(instructor.id)
+    if primary is None:
+        return instructor
+    payload = instructor.model_dump(mode="python", exclude_none=True)
+    payload["id"] = primary
+    payload["email"] = primary
+    return InstructorConfig.model_validate(payload)
 
 def collapse_duplicate_instructors(
     instructors_map: dict[str, InstructorConfig],
@@ -857,10 +970,16 @@ def _lookup_keys_for_instructor(instructor: InstructorConfig) -> list[str]:
         keys.extend(_en_name_lookup_keys(instructor.name_en))
     if instructor.name_ru:
         keys.extend(_ru_name_lookup_keys(instructor.name_ru))
+    for email in extract_emails(instructor.email) or extract_emails(instructor.id):
+        keys.append(email)
     if instructor.email:
         keys.append(instructor.email.lower())
     if instructor.alias:
         keys.append(instructor.alias.lstrip("@").casefold())
+    # Keep legacy multi-email id lookups working until configs are regenerated.
+    if "," in instructor.id:
+        keys.append(instructor.id.lower())
+        keys.extend(extract_emails(instructor.id))
     return keys
 
 
@@ -871,11 +990,30 @@ class InstructorRegistry:
 
     @classmethod
     def from_config(cls, config: InstructorsConfig) -> InstructorRegistry:
-        by_id = {instructor.id: instructor for instructor in config.instructors}
-        name_index: dict[str, str] = {}
+        by_id: dict[str, InstructorConfig] = {}
+        legacy_redirects: dict[str, str] = {}
         for instructor in config.instructors:
+            original_id = instructor.id
+            normalized = normalize_instructor_config(instructor)
+            existing = by_id.get(normalized.id)
+            if existing is None:
+                by_id[normalized.id] = normalized
+            else:
+                profile = instructor_config_to_profile(existing)
+                profile.merge(instructor_config_to_profile(normalized))
+                by_id[normalized.id] = profile.to_instructor_config()
+            if original_id != normalized.id:
+                legacy_redirects[original_id] = normalized.id
+            for email in extract_emails(original_id) + extract_emails(instructor.email):
+                if email != normalized.id:
+                    legacy_redirects.setdefault(email, normalized.id)
+        name_index: dict[str, str] = {}
+        for instructor in by_id.values():
             for key in _lookup_keys_for_instructor(instructor):
                 name_index.setdefault(key, instructor.id)
+        for legacy_id, canonical_id in legacy_redirects.items():
+            name_index.setdefault(legacy_id.lower(), canonical_id)
+            name_index.setdefault(legacy_id, canonical_id)
         return cls(by_id=by_id, name_index=name_index)
 
     @classmethod
@@ -887,6 +1025,15 @@ class InstructorRegistry:
         if not cleaned:
             return to_instructor_id(token)
         if "@" in cleaned:
+            primary = pick_primary_email(cleaned)
+            if primary:
+                hit = self.name_index.get(primary) or self.by_id.get(primary)
+                if hit:
+                    return hit if isinstance(hit, str) else hit.id
+            for email in extract_emails(cleaned):
+                hit = self.name_index.get(email) or self.by_id.get(email)
+                if hit:
+                    return hit if isinstance(hit, str) else hit.id
             hit = self.name_index.get(cleaned.lower())
             if hit:
                 return hit
