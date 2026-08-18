@@ -230,7 +230,7 @@ def build_section_program_maps(
 ) -> tuple[dict[str, str], dict[str, str]]:
     group_to_program: dict[str, str] = {}
     selector_to_program: dict[str, str] = {}
-    for section in cfg.sections:
+    for section in cfg.term.sections:
         for program in section.programs:
             label = program_track_label(section.name, program.name)
             selector_to_program[f"@{program.code}"] = label
@@ -246,8 +246,8 @@ def build_section_program_maps(
 
 def build_token_to_section_kind(cfg: ScheduleConfig) -> dict[str, str]:
     token_to_kind: dict[str, str] = {}
-    for section in cfg.sections:
-        kind = str(section.kind or section.code or "").strip().lower()
+    for section in cfg.term.sections:
+        kind = str(section.code or "").strip().lower()
         if not kind:
             continue
         for program in section.programs:

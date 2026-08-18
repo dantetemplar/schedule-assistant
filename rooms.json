@@ -320,6 +320,21 @@
     "restrict_daytime": false
   },
   {
+    "id": "421",
+    "title": "Lecture Room 421",
+    "short_name": "421",
+    "access_level": "red",
+    "restrict_daytime": false
+  },
+  {
+    "id": "421",
+    "title": "Lecture Room 421",
+    "short_name": "421",
+    "capacity": 26,
+    "access_level": "red",
+    "restrict_daytime": false
+  },
+  {
     "id": "425",
     "title": "Meeting Room 425",
     "short_name": "425",

@@ -14,6 +14,8 @@ from config import InstructorConfig, InstructorsConfig
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 EMAIL_PATTERN = re.compile(r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}")
+# Azure AD imAddresses: ObjectId (32 hex, no dashes) glued to the real local-part.
+AZURE_IM_ADDRESS_PATTERN = re.compile(r"^[0-9a-f]{32}.+@", re.IGNORECASE)
 
 USERS_CSV_DEFAULT_NAMES = (
     "2024-26.ProjectionFaculty - People.25-26 (1) (2).csv",
@@ -34,9 +36,17 @@ def _email_domain_rank(email: str) -> int:
         return 0
     if lowered.endswith("@innopolis.ru"):
         return 1
+    # Guest / synced mailboxes — never preferred as instructor ids.
+    if lowered.endswith("@innopolis.onmicrosoft.com") or "#ext#" in lowered:
+        return 50
     if "@innopolis." in lowered:
-        return 2
+        return 5
     return 10
+
+
+def _is_azure_im_address(email: str) -> bool:
+    """True for SIP/IM aliases like ``{objectIdWithoutDashes}{upn}@domain``."""
+    return bool(AZURE_IM_ADDRESS_PATTERN.match(email))
 
 
 def extract_emails(raw: str | None) -> list[str]:
@@ -46,6 +56,8 @@ def extract_emails(raw: str | None) -> list[str]:
     seen: set[str] = set()
     for match in EMAIL_PATTERN.findall(str(raw)):
         if "#EXT#" in match.upper():
+            continue
+        if _is_azure_im_address(match):
             continue
         email = match.lower()
         if email in seen:
@@ -64,14 +76,16 @@ def pick_primary_email(raw: str | None) -> str | None:
 
 
 def _row_primary_email(row: dict[str, str]) -> str | None:
-    upn = str(row.get("userPrincipalName") or "").strip()
-    if upn and "@" in upn and "#EXT#" not in upn.upper():
-        return pick_primary_email(upn) or upn.lower()
-    for field in ("otherMails", "imAddresses"):
-        primary = pick_primary_email(str(row.get(field) or ""))
-        if primary:
-            return primary
-    return None
+    """Best corporate email from an exportUsers row (UPN + alternate mails).
+
+    Prefer UPN/mail/otherMails; imAddresses is only a fallback and Azure ObjectId
+    SIP aliases are filtered out in ``extract_emails``.
+    """
+    for key in ("userPrincipalName", "mail", "otherMails"):
+        email = pick_primary_email(str(row.get(key) or ""))
+        if email:
+            return email
+    return pick_primary_email(str(row.get("imAddresses") or ""))
 
 
 def _is_student_directory_row(row: dict[str, str]) -> bool:
@@ -81,31 +95,68 @@ def _is_student_directory_row(row: dict[str, str]) -> bool:
     return "OU=Applicants," in dn
 
 
-def _instructor_row_priority(row: dict[str, str]) -> int:
+def _instructor_row_priority(row: dict[str, str], email: str | None = None) -> int:
+    """Lower is better. Prefer staff + @innopolis.ru/@innopolis.university."""
     upn = str(row.get("userPrincipalName") or "")
+    primary = (email or _row_primary_email(row) or upn).lower()
+    rank = _email_domain_rank(primary) * 10
     if "#EXT#" in upn.upper():
-        return 100
+        rank += 100
     if str(row.get("userType") or "").strip() == "Guest":
-        return 50
+        rank += 50
+    if _is_student_directory_row(row):
+        rank += 20
     dn = str(row.get("onPremisesDistinguishedName") or "")
     if "OU=VizitingStaff," in dn:
-        return 0
-    if "@innopolis." in upn.lower():
-        return 5
-    return 10
+        rank -= 5
+    return rank
 
 
 def _has_cyrillic(text: str) -> bool:
-    return any("\u0400" <= char <= "\u04FF" for char in text)
+    return any("\u0400" <= char <= "\u04ff" for char in text)
 
 
 _GIVEN_NAME_VARIANTS: dict[str, set[str]] = {
     "andrei": {"andrei", "andrey"},
     "andrey": {"andrei", "andrey"},
-    "alexandr": {"alexandr", "alexander"},
-    "alexander": {"alexandr", "alexander"},
+    "alexandr": {"alexandr", "alexander", "aleksandr"},
+    "alexander": {"alexandr", "alexander", "aleksandr"},
+    "aleksandr": {"alexandr", "alexander", "aleksandr"},
+    "benjamin": {"benjamin", "benzhamin", "beniamin"},
+    "benzhamin": {"benjamin", "benzhamin", "beniamin"},
+    "beniamin": {"benjamin", "benzhamin", "beniamin"},
+    "imam": {"imam", "muwaffaq"},
+    "muwaffaq": {"imam", "muwaffaq"},
+    "iaroslav": {"iaroslav", "yaroslav"},
+    "yaroslav": {"iaroslav", "yaroslav"},
+    "yuri": {"yuri", "yurii", "yury"},
+    "yurii": {"yuri", "yurii", "yury"},
+    "yury": {"yuri", "yurii", "yury"},
+    "vladimir": {"vladimir", "vlad"},
+    "xavier": {"xavier", "ksavier"},
+    "ksavier": {"xavier", "ksavier"},
+    "alexei": {"alexei", "alexey", "aleksei", "aleksey"},
+    "alexey": {"alexei", "alexey", "aleksei", "aleksey"},
+    "aleksei": {"alexei", "alexey", "aleksei", "aleksey"},
+    "aleksey": {"alexei", "alexey", "aleksei", "aleksey"},
+    "dmitri": {"dmitri", "dmitry", "dmitriy", "dmitrii"},
+    "dmitry": {"dmitri", "dmitry", "dmitriy", "dmitrii"},
+    "dmitriy": {"dmitri", "dmitry", "dmitriy", "dmitrii"},
+    "dmitrii": {"dmitri", "dmitry", "dmitriy", "dmitrii"},
+    "evgeni": {"evgeni", "evgeny", "evgeniy", "evgenii", "eugene"},
+    "evgeny": {"evgeni", "evgeny", "evgeniy", "evgenii", "eugene"},
+    "evgeniy": {"evgeni", "evgeny", "evgeniy", "evgenii", "eugene"},
+    "evgenii": {"evgeni", "evgeny", "evgeniy", "evgenii", "eugene"},
+    "eugene": {"evgeni", "evgeny", "evgeniy", "evgenii", "eugene"},
+    "georgy": {"georgy", "georgii", "georgiy", "george"},
+    "georgii": {"georgy", "georgii", "georgiy", "george"},
+    "georgiy": {"georgy", "georgii", "georgiy", "george"},
+    "george": {"georgy", "georgii", "georgiy", "george"},
     "mikhail": {"mikhail", "michael"},
     "michael": {"mikhail", "michael"},
+    "natalia": {"natalia", "natalya", "nataliya"},
+    "natalya": {"natalia", "natalya", "nataliya"},
+    "nataliya": {"natalia", "natalya", "nataliya"},
     "nikolai": {"nikolai", "nikolay", "nicolai", "nicolay"},
     "nikolay": {"nikolai", "nikolay", "nicolai", "nicolay"},
     "nicolai": {"nikolai", "nikolay", "nicolai", "nicolay"},
@@ -113,6 +164,35 @@ _GIVEN_NAME_VARIANTS: dict[str, set[str]] = {
     "sergei": {"sergei", "sergey", "sergio"},
     "sergey": {"sergei", "sergey", "sergio"},
     "sergio": {"sergei", "sergey", "sergio"},
+    "valeria": {"valeria", "valeriia", "valeriya"},
+    "valeriia": {"valeria", "valeriia", "valeriya"},
+    "valeriya": {"valeria", "valeriia", "valeriya"},
+    "vlad": {"vlad", "vladislav"},
+    "vladislav": {"vlad", "vladislav"},
+}
+
+# Latin surname spellings that refer to the same Russian family name.
+_FAMILY_NAME_VARIANTS: dict[str, set[str]] = {
+    "zuyev": {"zuyev", "zouev", "zuev"},
+    "zouev": {"zuyev", "zouev", "zuev"},
+    "zuev": {"zuyev", "zouev", "zuev"},
+    # Потёмкин: ё→e (Potemkin), ё→yo (Potyomkin), email/old Potyomckin
+    "potemkin": {"potemkin", "potyomkin", "potyomckin"},
+    "potyomkin": {"potemkin", "potyomkin", "potyomckin"},
+    "potyomckin": {"potemkin", "potyomkin", "potyomckin"},
+    # Корнева (lessons) vs Корнаева (People / email)
+    "korneva": {"korneva", "kornaeva"},
+    "kornaeva": {"korneva", "kornaeva"},
+    "creed": {"creed", "kreed"},
+    "kreed": {"creed", "kreed"},
+    "andryushchenko": {"andryushchenko", "andriushchenko"},
+    "andriushchenko": {"andryushchenko", "andriushchenko"},
+    "harin": {"harin", "kharin"},
+    "kharin": {"harin", "kharin"},
+    "kostanyan": {"kostanyan", "kostanian"},
+    "kostanian": {"kostanyan", "kostanian"},
+    "mohammadifar": {"mohammadifar", "mohammadi"},
+    "mohammadi": {"mohammadifar", "mohammadi"},
 }
 
 # Passport / scholarly RU→LAT (щ→shch matches Moshchanetskii).
@@ -192,6 +272,15 @@ def _given_names_compatible(left: str, right: str) -> bool:
     return right_key in left_variants
 
 
+def _family_names_compatible(left: str, right: str) -> bool:
+    left_key = left.casefold()
+    right_key = right.casefold()
+    if left_key == right_key:
+        return True
+    left_variants = _FAMILY_NAME_VARIANTS.get(left_key, {left_key})
+    return right_key in left_variants
+
+
 def _en_name_lookup_keys(name: str) -> list[str]:
     cleaned = " ".join(name.split())
     if not cleaned:
@@ -205,15 +294,45 @@ def _en_name_lookup_keys(name: str) -> list[str]:
         keys.add(normalize_person_name(f"{parts[1]} {parts[0]}"))
         given = parts[0]
         family = " ".join(parts[1:])
-        for variant in _GIVEN_NAME_VARIANTS.get(given.casefold(), {given}):
-            keys.add(normalize_person_name(f"{variant} {family}"))
+        given_variants = _GIVEN_NAME_VARIANTS.get(given.casefold(), {given})
+        family_variants = _FAMILY_NAME_VARIANTS.get(family.casefold(), {family})
+        for given_variant in given_variants:
+            for family_variant in family_variants:
+                keys.add(normalize_person_name(f"{given_variant} {family_variant}"))
+                keys.add(normalize_person_name(f"{family_variant} {given_variant}"))
+        # Compact first+last for long Western names ("Karim … ElDakroury").
+        if len(parts) >= 3:
+            last = parts[-1]
+            last_variants = _FAMILY_NAME_VARIANTS.get(last.casefold(), {last})
+            for given_variant in given_variants:
+                for last_variant in last_variants:
+                    keys.add(normalize_person_name(f"{given_variant} {last_variant}"))
+                    keys.add(normalize_person_name(f"{last_variant} {given_variant}"))
+            # Also treat second token as a surname candidate (Xavier … Vasquez Zelada).
+            for mid in parts[1:-1]:
+                mid_family = _FAMILY_NAME_VARIANTS.get(mid.casefold(), {mid})
+                for given_variant in given_variants:
+                    for mid_variant in mid_family:
+                        keys.add(
+                            normalize_person_name(f"{given_variant} {mid_variant}")
+                        )
+                        keys.add(
+                            normalize_person_name(f"{mid_variant} {given_variant}")
+                        )
         # FIO / family-given: also index given+family without patronymic.
         if len(parts) >= 3:
             keys.add(normalize_person_name(f"{parts[1]} {parts[0]}"))
             keys.add(normalize_person_name(f"{parts[0]} {parts[1]}"))
-            for variant in _GIVEN_NAME_VARIANTS.get(parts[1].casefold(), {parts[1]}):
-                keys.add(normalize_person_name(f"{variant} {parts[0]}"))
-                keys.add(normalize_person_name(f"{parts[0]} {variant}"))
+            mid = parts[1]
+            mid_variants = _GIVEN_NAME_VARIANTS.get(mid.casefold(), {mid})
+            family_head = parts[0]
+            family_head_variants = _FAMILY_NAME_VARIANTS.get(
+                family_head.casefold(), {family_head}
+            )
+            for mid_variant in mid_variants:
+                for family_variant in family_head_variants:
+                    keys.add(normalize_person_name(f"{mid_variant} {family_variant}"))
+                    keys.add(normalize_person_name(f"{family_variant} {mid_variant}"))
     return list(keys)
 
 
@@ -251,6 +370,11 @@ def _given_family_candidates(name: str) -> list[tuple[str, str]]:
         if len(latin_parts) >= 3:
             # Traditional RU FIO: family given patronymic
             candidates.append((latin_parts[1], latin_parts[0]))
+            # Compound Western names: Naghmeh Mohammadi Far / Xavier Antonio Vasquez
+            candidates.append((latin_parts[0], latin_parts[1]))
+            candidates.append((latin_parts[1], latin_parts[0]))
+            for family_part in latin_parts[1:-1]:
+                candidates.append((latin_parts[0], family_part))
     # Deduplicate while preserving order
     seen: set[tuple[str, str]] = set()
     unique: list[tuple[str, str]] = []
@@ -286,6 +410,7 @@ class ExportEntry:
     email: str
     name_en: str | None = None
     name_ru: str | None = None
+    include_in_roster: bool = True
 
 
 def _load_export_users_directory(
@@ -296,22 +421,37 @@ def _load_export_users_directory(
     by_email: dict[str, ExportEntry] = {}
     with csv_path.open(encoding="utf-8", newline="") as handle:
         for row in csv.DictReader(handle):
-            if _is_student_directory_row(row):
-                continue
             display_name = str(row.get("displayName") or "").strip()
             email = _row_primary_email(row)
             if not display_name or not email:
                 continue
+            # Keep student accounts for name→email resolution (many TAs), but do not
+            # dump every student into instructors.yaml.
+            is_student = _is_student_directory_row(row)
             name_en, name_ru = _split_display_name(display_name)
-            entry = ExportEntry(email=email, name_en=name_en, name_ru=name_ru)
-            by_email[email] = entry
-            priority = _instructor_row_priority(row)
+            entry = ExportEntry(
+                email=email,
+                name_en=name_en,
+                name_ru=name_ru,
+                include_in_roster=not is_student,
+            )
+            existing_email = by_email.get(email)
+            if existing_email is None or (
+                entry.include_in_roster and not existing_email.include_in_roster
+            ):
+                by_email[email] = entry
+            priority = _instructor_row_priority(row, email)
             for key in _en_name_lookup_keys(name_en or display_name):
                 current = best_by_en.get(key)
                 if current is None or priority < current[1]:
                     best_by_en[key] = (entry, priority)
             if name_ru:
                 for key in _ru_name_lookup_keys(name_ru):
+                    current = best_by_ru.get(key)
+                    if current is None or priority < current[1]:
+                        best_by_ru[key] = (entry, priority)
+            elif _has_cyrillic(display_name):
+                for key in _ru_name_lookup_keys(display_name):
                     current = best_by_ru.get(key)
                     if current is None or priority < current[1]:
                         best_by_ru[key] = (entry, priority)
@@ -354,7 +494,9 @@ class InstructorProfile:
         if other.email:
             primary = pick_primary_email(other.email) or other.email
             # Prefer Innopolis corporate email when merging conflicting addresses.
-            if not self.email or _email_domain_rank(primary) < _email_domain_rank(self.email):
+            if not self.email or _email_domain_rank(primary) < _email_domain_rank(
+                self.email
+            ):
                 self.email = primary
                 self.id = primary
             elif "," in (self.email or "") or "," in (self.id or ""):
@@ -364,7 +506,9 @@ class InstructorProfile:
             self.name_en = other.name_en
         if other.name_ru:
             candidate_ru = other.name_ru
-            if not self.name_ru or len(candidate_ru.split()) > len(self.name_ru.split()):
+            if not self.name_ru or len(candidate_ru.split()) > len(
+                self.name_ru.split()
+            ):
                 self.name_ru = candidate_ru
         if other.alias and not self.alias:
             self.alias = other.alias
@@ -487,16 +631,22 @@ class PeopleCatalog:
                 continue
             name_en = str(row[name_en_idx] or "").strip()
             name_ru_raw = str(row[name_ru_idx] or "").strip()
-            name_ru = name_ru_raw if name_ru_raw and _has_cyrillic(name_ru_raw) else None
+            name_ru = (
+                name_ru_raw if name_ru_raw and _has_cyrillic(name_ru_raw) else None
+            )
             email_raw = str(row[email_idx] or "").strip()
             emails = extract_emails(email_raw)
             email = pick_primary_email(email_raw)
             alias_raw = (
-                str(row[alias_idx] or "").strip() if alias_idx >= 0 and alias_idx < len(row) else ""
+                str(row[alias_idx] or "").strip()
+                if alias_idx >= 0 and alias_idx < len(row)
+                else ""
             )
             alias = alias_raw if alias_raw and alias_raw != "[не использует]" else None
             position_raw = (
-                str(row[position_idx] or "").strip() if position_idx >= 0 and position_idx < len(row) else ""
+                str(row[position_idx] or "").strip()
+                if position_idx >= 0 and position_idx < len(row)
+                else ""
             )
             position = position_raw if position_raw else None
             self._register(
@@ -635,8 +785,12 @@ def _find_export_entry(token: str, lookup: InstructorLookup) -> ExportEntry | No
 
 
 def _apply_export_to_profile(profile: InstructorProfile, export: ExportEntry) -> None:
-    profile.email = export.email
-    profile.id = export.email
+    if export.email:
+        if not profile.email or _email_domain_rank(export.email) < _email_domain_rank(
+            profile.email
+        ):
+            profile.email = export.email
+            profile.id = export.email
     if export.name_en and not profile.name_en:
         profile.name_en = export.name_en
     if export.name_ru and not profile.name_ru:
@@ -648,15 +802,45 @@ def _apply_people_to_profile(profile: InstructorProfile, people: PeopleEntry) ->
         profile.name_en = people.name_en
     if people.name_ru:
         candidate_ru = people.name_ru
-        if not profile.name_ru or len(candidate_ru.split()) > len(profile.name_ru.split()):
+        if not profile.name_ru or len(candidate_ru.split()) > len(
+            profile.name_ru.split()
+        ):
             profile.name_ru = candidate_ru
     if people.email:
-        profile.email = people.email
-        profile.id = people.email
+        if not profile.email or _email_domain_rank(people.email) < _email_domain_rank(
+            profile.email
+        ):
+            profile.email = people.email
+            profile.id = people.email
     if people.alias and not profile.alias:
         profile.alias = people.alias
     if people.position and not profile.position:
         profile.position = people.position
+
+
+def _best_export_for_token(token: str, lookup: InstructorLookup) -> ExportEntry | None:
+    """Resolve exportUsers row, preferring @innopolis.ru / @innopolis.university."""
+    candidates: list[ExportEntry] = []
+    cleaned = " ".join(token.split())
+    if not cleaned:
+        return None
+    primary = _find_export_entry(cleaned, lookup)
+    if primary:
+        candidates.append(primary)
+    if _has_cyrillic(cleaned):
+        for key in _ru_name_lookup_keys(cleaned):
+            hit = lookup.export_by_ru.get(key)
+            if hit:
+                candidates.append(hit)
+    for key in _en_name_lookup_keys(cleaned):
+        hit = lookup.export_by_en.get(key)
+        if hit:
+            candidates.append(hit)
+    if not candidates:
+        return None
+    return min(
+        candidates, key=lambda entry: (_email_domain_rank(entry.email), entry.email)
+    )
 
 
 def _profile_label_tokens(profile: InstructorProfile) -> set[str]:
@@ -671,9 +855,11 @@ def _profile_label_tokens(profile: InstructorProfile) -> set[str]:
     return tokens
 
 
-def _names_refer_to_same_person(left: InstructorProfile, right: InstructorProfile) -> bool:
-    if left.email and right.email:
-        return left.email == right.email
+def _names_refer_to_same_person(
+    left: InstructorProfile, right: InstructorProfile
+) -> bool:
+    if left.email and right.email and left.email == right.email:
+        return True
 
     for left_name in (left.name_en, left.name_ru):
         if not left_name:
@@ -696,7 +882,7 @@ def _names_refer_to_same_person(left: InstructorProfile, right: InstructorProfil
 
             for left_given, left_family in _given_family_candidates(left_name):
                 for right_given, right_family in _given_family_candidates(right_name):
-                    if left_family.casefold() != right_family.casefold():
+                    if not _family_names_compatible(left_family, right_family):
                         continue
                     if _given_names_compatible(left_given, right_given):
                         return True
@@ -723,14 +909,28 @@ def instructor_config_to_profile(instructor: InstructorConfig) -> InstructorProf
 
 
 def _prefer_canonical_id(left: InstructorConfig, right: InstructorConfig) -> str:
-    left_email = pick_primary_email(left.email or left.id) if (left.email or "@" in left.id) else None
-    right_email = pick_primary_email(right.email or right.id) if (right.email or "@" in right.id) else None
+    left_email = (
+        pick_primary_email(left.email or left.id)
+        if (left.email or "@" in left.id)
+        else None
+    )
+    right_email = (
+        pick_primary_email(right.email or right.id)
+        if (right.email or "@" in right.id)
+        else None
+    )
     if left_email and right_email:
         left_rank = _email_domain_rank(left_email)
         right_rank = _email_domain_rank(right_email)
         if left_rank != right_rank:
             return left.id if left_rank < right_rank else right.id
-        return left.id if left.email == left.id else right.id if right.email == right.id else left.id
+        return (
+            left.id
+            if left.email == left.id
+            else right.id
+            if right.email == right.id
+            else left.id
+        )
     if left_email and not right_email:
         return left.id
     if right_email and not left_email:
@@ -758,6 +958,7 @@ def normalize_instructor_config(instructor: InstructorConfig) -> InstructorConfi
     payload["id"] = primary
     payload["email"] = primary
     return InstructorConfig.model_validate(payload)
+
 
 def collapse_duplicate_instructors(
     instructors_map: dict[str, InstructorConfig],
@@ -787,6 +988,9 @@ def collapse_duplicate_instructors(
         for right_id in ids[index + 1 :]:
             right = instructor_config_to_profile(instructors_map[right_id])
             if left.email and right.email and left.email != right.email:
+                # Guest + corporate mailboxes: merge only when names clearly match.
+                if _names_refer_to_same_person(left, right):
+                    union(left_id, right_id)
                 continue
             if profiles_should_merge(left, right):
                 union(left_id, right_id)
@@ -861,8 +1065,58 @@ def remap_instructor_ids_in_obj(node: Any, id_map: dict[str, str]) -> Any:
     return node
 
 
-def resolve_instructor_profile(token: str, lookup: InstructorLookup) -> InstructorProfile:
+_INITIAL_SURNAME = re.compile(
+    r"^([A-Za-zА-Яа-яЁё])\.\s+([A-Za-zА-Яа-яЁё][A-Za-zА-Яа-яЁё\-']+)$"
+)
+
+
+def _expand_initial_surname_token(token: str, lookup: InstructorLookup) -> str:
+    """Map 'В. Гордин' onto a full People/export display name when unambiguous."""
+    match = _INITIAL_SURNAME.match(token)
+    if not match:
+        return token
+    initial, surname = match.group(1), match.group(2)
+    initial_cf = initial.casefold()
+    surname_cf = surname.casefold()
+    hits: list[str] = []
+
+    def consider(name: str | None) -> None:
+        if not name:
+            return
+        parts = name.split()
+        if len(parts) < 2:
+            return
+        if parts[-1].casefold() == surname_cf or parts[0].casefold() == surname_cf:
+            given = parts[0] if parts[-1].casefold() == surname_cf else parts[1]
+            if given[:1].casefold() == initial_cf:
+                hits.append(name)
+
+    for entry in lookup.people.iter_unique():
+        consider(entry.name_en)
+        consider(entry.name_ru)
+    for index in (lookup.export_by_en, lookup.export_by_ru):
+        for key, entry in index.items():
+            # Compare latinized surname so "Гордин" matches key "gordin …".
+            latin_surname = transliterate_ru_to_en(surname).casefold()
+            if surname_cf not in key and latin_surname not in key:
+                continue
+            consider(entry.name_en)
+            consider(entry.name_ru)
+    # Prefer the People sheet name when several spellings refer to one person.
+    unique = list(dict.fromkeys(hits))
+    if len(unique) == 1:
+        return unique[0]
+    if not unique:
+        return token
+    people_hits = [name for name in unique if lookup.people.find(name) is not None]
+    return people_hits[0] if len(people_hits) == 1 else unique[0]
+
+
+def resolve_instructor_profile(
+    token: str, lookup: InstructorLookup
+) -> InstructorProfile:
     display_name = " ".join(token.split())
+    display_name = _expand_initial_surname_token(display_name, lookup)
     name_en, name_ru = _split_display_name(display_name)
     profile = InstructorProfile(
         id=display_name,
@@ -871,19 +1125,27 @@ def resolve_instructor_profile(token: str, lookup: InstructorLookup) -> Instruct
     )
 
     people = lookup.people.find(display_name)
-    export = _find_export_entry(display_name, lookup)
-    if people and not export and people.name_ru:
-        for key in _ru_name_lookup_keys(people.name_ru):
-            export = lookup.export_by_ru.get(key)
-            if export:
-                break
+    export = _best_export_for_token(display_name, lookup)
+    if people:
+        for people_token in (people.name_en, people.name_ru):
+            if not people_token:
+                continue
+            alt = _best_export_for_token(people_token, lookup)
+            if alt is None:
+                continue
+            if export is None or _email_domain_rank(alt.email) < _email_domain_rank(
+                export.email
+            ):
+                export = alt
 
     if export:
         _apply_export_to_profile(profile, export)
     if people:
         _apply_people_to_profile(profile, people)
     if not profile.email:
-        profile.id = to_instructor_id(profile.name_en or profile.name_ru or display_name)
+        profile.id = to_instructor_id(
+            profile.name_en or profile.name_ru or display_name
+        )
     return profile
 
 
@@ -943,6 +1205,8 @@ def build_roster_from_lookup(lookup: InstructorLookup) -> list[InstructorConfig]
         if token:
             register_instructor_profile(token, profiles, lookup)
     for export in lookup.export_by_email.values():
+        if not export.include_in_roster:
+            continue
         token = export.name_en or export.name_ru or export.email
         if token:
             register_instructor_profile(token, profiles, lookup)
@@ -987,6 +1251,7 @@ def _lookup_keys_for_instructor(instructor: InstructorConfig) -> list[str]:
 class InstructorRegistry:
     by_id: dict[str, InstructorConfig]
     name_index: dict[str, str]
+    lookup: InstructorLookup | None = None
 
     @classmethod
     def from_config(cls, config: InstructorsConfig) -> InstructorRegistry:
@@ -1024,6 +1289,8 @@ class InstructorRegistry:
         cleaned = " ".join(token.split())
         if not cleaned:
             return to_instructor_id(token)
+        if self.lookup is not None:
+            cleaned = _expand_initial_surname_token(cleaned, self.lookup)
         if "@" in cleaned:
             primary = pick_primary_email(cleaned)
             if primary:
@@ -1055,7 +1322,24 @@ class InstructorRegistry:
     def seed_instructors_map(self) -> dict[str, InstructorConfig]:
         return dict(self.by_id)
 
-    def resolve_into_map(self, name: str, instructors_map: dict[str, InstructorConfig]) -> str:
+    def resolve_into_map(
+        self, name: str, instructors_map: dict[str, InstructorConfig]
+    ) -> str:
+        if self.lookup is not None:
+            profile = resolve_instructor_profile(name, self.lookup)
+            if profile.email and _email_domain_rank(profile.email) <= 1:
+                instructor_id = profile.email
+                cfg = profile.to_instructor_config()
+                existing = instructors_map.get(instructor_id) or self.by_id.get(
+                    instructor_id
+                )
+                if existing is not None:
+                    kept = instructor_config_to_profile(existing)
+                    kept.merge(profile)
+                    instructors_map[instructor_id] = kept.to_instructor_config()
+                else:
+                    instructors_map[instructor_id] = cfg
+                return instructor_id
         instructor_id = self.resolve_id(name)
         if instructor_id in instructors_map:
             existing = instructors_map[instructor_id]
@@ -1092,7 +1376,9 @@ class InstructorRegistry:
                 existing if keep_id == existing_id else stub
             )
             kept.merge(
-                instructor_config_to_profile(stub if keep_id == existing_id else existing)
+                instructor_config_to_profile(
+                    stub if keep_id == existing_id else existing
+                )
             )
             new_cfg = kept.to_instructor_config()
             if existing_id in instructors_map:

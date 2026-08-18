@@ -1,4 +1,3 @@
-
 import datetime
 from dataclasses import dataclass
 from enum import StrEnum
@@ -10,7 +9,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class SettingBaseModel(BaseModel):
-    model_config = ConfigDict(use_attribute_docstrings=True, extra="forbid", populate_by_name=True)
+    model_config = ConfigDict(
+        use_attribute_docstrings=True, extra="forbid", populate_by_name=True
+    )
 
 
 class Weekday(StrEnum):
@@ -27,7 +28,9 @@ class Weekday(StrEnum):
         return list(Weekday).index(self)
 
 
-def week_start_for_date(value: datetime.date, starting_day: Weekday = Weekday.MONDAY) -> datetime.date:
+def week_start_for_date(
+    value: datetime.date, starting_day: Weekday = Weekday.MONDAY
+) -> datetime.date:
     """First day of the calendar week containing ``value`` (week aligned to ``starting_day``)."""
     return value - datetime.timedelta(days=(value.weekday() - starting_day.index) % 7)
 
@@ -71,12 +74,27 @@ class TermConfig(SettingBaseModel):
         TermTimeSlot(start_time=datetime.time(19, 20), end_time=datetime.time(20, 50)),
     ]
     "Teaching slots for the term"
+    sections: list["SectionConfig"] = Field(default_factory=list)
+    "Section-based hierarchy from dtsn.yaml"
     instructor_positions: list[str] = []
     "Allowed instructor.position values (staff titles); empty means unrestricted"
     course_instructor_roles: list[str] = []
     "Allowed course.instructors[].role values (subject roles); empty means unrestricted"
     course_component_tags: list[str] = []
     "Allowed course.components[].tag values; empty means unrestricted"
+    room_attributes: list["RoomAttributeDef"] = Field(default_factory=list)
+    "Allowed room.features keys with types; empty means any key is allowed"
+
+
+class RoomAttributeDef(SettingBaseModel):
+    key: str
+    "Attribute key stored in room.features"
+    type: Literal["boolean", "string", "number", "enum", "list"]
+    "Value type for this attribute"
+    hint: str | None = None
+    "Short hint shown next to the attribute in the room editor"
+    enum_values: list[str] = Field(default_factory=list)
+    "Allowed values when type is enum; ignored otherwise"
 
 
 class RoomConfig(SettingBaseModel):
@@ -84,8 +102,10 @@ class RoomConfig(SettingBaseModel):
     "Room identifier used in schedule output"
     name: str
     "Human-readable room name"
-    capacity: int
+    capacity: int | None = None
     "Maximum room capacity"
+    features: dict[str, bool | str | int | list[str]] = Field(default_factory=dict)
+    "Room attribute values keyed by term.room_attributes[].key"
 
 
 class InstructorConfig(SettingBaseModel):
@@ -123,8 +143,6 @@ class SectionConfig(SettingBaseModel):
             "Track identifier"
             name: str
             "Track display name"
-            kind: Literal["track", "english_program"] | str | None = None
-            "Track kind marker"
             groups: list[str] = []
             "Track groups as plain group codes"
 
@@ -132,16 +150,6 @@ class SectionConfig(SettingBaseModel):
         "Program identifier"
         name: str
         "Program display name"
-        kind: Literal["degree_year", "english_program", "elective_bucket"] | str | None = None
-        "Program kind marker"
-        degree: str | None = None
-        "Optional degree marker (for example, bs/ms/phd)"
-        language: Literal["en", "ru"] | None = None
-        "Program language marker (en/ru)"
-        year: int | None = None
-        "Program year"
-        applies_to: list[str] = []
-        "Optional list of entity codes this program applies to (for example, [BS_Y1_EN, BS_Y1_RU])"
         tracks: list[ProgramTrack] = []
         "Program tracks (optional wrapper when groups are split by track)"
         groups: list[str] = []
@@ -153,8 +161,8 @@ class SectionConfig(SettingBaseModel):
     "Section identifier"
     name: str
     "Section display name"
-    kind: Literal["core", "english", "electives"] | str | None = None
-    "Section kind marker (for example, core/english/electives)"
+    default_layout: Literal["groups", "calendar"] | None = None
+    "Default timetable layout when opening this section (groups or calendar)"
     programs: list[SectionProgram] = []
     "Programs inside the section"
 
@@ -290,6 +298,8 @@ class CourseConfig(SettingBaseModel):
 
     name: str
     "Course name"
+    section_code: str
+    "Exactly one timetable section this course belongs to (term.sections[].code)"
     short_name: str | None = None
     "Short English display name"
     name_ru: str | None = None
@@ -306,13 +316,11 @@ class ScheduleConfig(SettingBaseModel):
     schema_: str | None = Field(None, alias="$schema")
     "Optional JSON schema reference"
     term: TermConfig
-    "Term-level configuration"
+    "Term-level configuration (sections are nested inside term)"
     rooms: list[RoomConfig] = []
     "Available rooms"
     instructors: list[InstructorConfig] = []
     "Available instructors"
-    sections: list[SectionConfig] = []
-    "Section-based hierarchy from dtsn.yaml"
     students_groups: list[StudentsGroups] = []
     "Student groups entries"
     courses: list[CourseConfig] = []
@@ -321,7 +329,15 @@ class ScheduleConfig(SettingBaseModel):
     @classmethod
     def from_yaml(cls, path: Path) -> Self:
         with open(path, encoding="utf-8") as f:
-            yaml_config = yaml.safe_load(f)
+            yaml_config = yaml.safe_load(f) or {}
+        if isinstance(yaml_config, dict) and "sections" in yaml_config:
+            term = dict(yaml_config.get("term") or {})
+            if "sections" not in term:
+                term["sections"] = yaml_config["sections"]
+            yaml_config = {
+                key: value for key, value in yaml_config.items() if key != "sections"
+            }
+            yaml_config["term"] = term
         return cls.model_validate(yaml_config)
 
     @classmethod
@@ -357,7 +373,7 @@ class ScheduleConfig(SettingBaseModel):
 
 def resolve_selector_map(cfg: ScheduleConfig) -> dict[str, set[str]]:
     selector_map: dict[str, set[str]] = {}
-    for section in cfg.sections:
+    for section in cfg.term.sections:
         for program in section.programs:
             program_groups: set[str] = set(program.groups)
             for track in program.tracks:
