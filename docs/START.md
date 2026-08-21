@@ -184,9 +184,9 @@ Top-level fields:
 - `required_count` — integer or `"half"` / `"full"` (`"full"` default).
 - `per_week`, `duration_slots` — weekly frequency and length in slot units.
 - `instructor_pool` — list of instructor ids; a nested list is one co-teaching set. Example: `[[a, b], [c]]` means either `a`+`b` together or `c` alone.
-- `student_groups` — audience group ids (or selectors resolved upstream).
+- `audience` — group ids (or selectors resolved upstream).
 - `expected_enrollment` — optional; room sizing if set.
-- `per_group` — if true, one scheduled instance per entry in `student_groups`.
+- `per_group` — if true, one scheduled instance per entry in `audience`.
 
 **`constraints.weights`** — map each `ConstraintType` id to a positive float or `"hard"`. Defaults in code include: `no_room_overlap`, `no_instructor_overlap`, `no_group_overlap`, `no_student_overlap_by_membership`, `allowed_slots` as `"hard"`; `room_capacity` as `3.0`; `minimize_gaps_for_groups` `5.0`; `instructor_max_per_day` `8.0`; `time_preference` `1.0`; `too_big_room` `0.5`.
 
@@ -318,7 +318,7 @@ Written by `main.py` via `yaml.safe_dump` (default path `--output`, usually `sch
 | Field | Meaning |
 | --- | --- |
 | `tag` | Class part id (`lec`, `tut`, `lab`, …) |
-| `student_groups` | Audience from config |
+| `audience` | Audience from config |
 | `instructor_pool` | Serialized pool (strings or nested lists for co-teaching) |
 | `instances` | List of placement bundles (see below) |
 
@@ -332,7 +332,7 @@ Written by `main.py` via `yaml.safe_dump` (default path `--output`, usually `sch
 | `start_times` | Slot start times (`HH:MM`), aligned with `term.time_slots` |
 | `rooms` | Room ids per meeting |
 
-With `per_group: true` and several `student_groups`, the solver emits **one instance object per group** (each with its own `groups`, `dates`, …). Index *i* across `dates`, `start_times`, `rooms`, and `instructors` is one meeting. The current `main.py` usually writes a single meeting per solved row (length-1 lists); [`output.yaml`](../output.yaml) also shows longer parallel lists as a richer example.
+With `per_group: true` and several `audience` entries, the solver emits **one instance object per group** (each with its own `groups`, `dates`, …). Index *i* across `dates`, `start_times`, `rooms`, and `instructors` is one meeting. The current `main.py` usually writes a single meeting per solved row (length-1 lists); [`output.yaml`](../output.yaml) also shows longer parallel lists as a richer example.
 
 ```yaml
 metadata:

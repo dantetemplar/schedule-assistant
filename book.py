@@ -363,7 +363,7 @@ def resolve_program_name(
 def _session_audiences(component: CourseConfig.Component, session: ComponentSessionSeries) -> list[str]:
     if session.audience:
         return list(session.audience)
-    return list(component.student_groups)
+    return list(component.audience)
 
 
 def _audiences_key(audiences: list[str]) -> str:
@@ -568,7 +568,7 @@ def _slots_from_session(
     slot_id_prefix: str,
 ) -> list[SlotRow]:
     slots: list[SlotRow] = []
-    for index, occurrence in enumerate(session.occurrences or []):
+    for index, occurrence in enumerate(session.dates_pattern or []):
         start_time = occurrence.start_time.strftime("%H:%M:%S")
         end_time = occurrence.end_time.strftime("%H:%M:%S")
         room = _normalize_room(occurrence.room)
@@ -2880,7 +2880,7 @@ def main(argv: list[str] | None = None) -> None:
     cfg = ScheduleConfig.from_yaml(args.config)
     programs = build_program_groups_from_config(cfg)
     if not programs:
-        print("No bookable sessions in config (need component.sessions with occurrences or weekly_pattern)", file=sys.stderr)
+        print("No bookable sessions in config (need component.sessions with dates_pattern or weekly_pattern)", file=sys.stderr)
         sys.exit(1)
 
     slot_payloads = collect_all_slot_payloads(programs)

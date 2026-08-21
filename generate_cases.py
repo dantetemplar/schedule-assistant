@@ -65,12 +65,12 @@ def _filter_courses(cfg: dict, selector_map: dict[str, set[str]], target_groups:
         filtered_components = []
         components = course_item.get("components") or []
         for comp_item in components:
-            expanded = set(_expand_groups(comp_item.get("student_groups", []), selector_map))
+            expanded = set(_expand_groups(comp_item.get("audience", []), selector_map))
             selected_groups = sorted(expanded.intersection(target_groups))
             if not selected_groups:
                 continue
             component = dict(comp_item)
-            component["student_groups"] = selected_groups
+            component["audience"] = selected_groups
             filtered_components.append(component)
         if filtered_components:
             course = dict(course_item)
@@ -115,7 +115,7 @@ def _generate_program_year_cases(candidate_path: Path, output_dir: Path) -> None
                 if "english" not in course_name and "foreign language" not in course_name:
                     continue
                 for comp_item in course_item.get("components", []):
-                    expanded = set(_expand_groups(comp_item.get("student_groups", []), selector_map))
+                    expanded = set(_expand_groups(comp_item.get("audience", []), selector_map))
                     english_target_groups.update(group for group in expanded if group in english_by_code)
             target_groups.update(english_target_groups)
         if not target_groups:
@@ -207,7 +207,7 @@ def _generate_program_level_full_with_english_cases(candidate_path: Path, output
         if "english" not in course_name and "foreign language" not in course_name:
             continue
         for comp_item in course_item.get("components", []):
-            expanded = set(_expand_groups(comp_item.get("student_groups", []), selector_map))
+            expanded = set(_expand_groups(comp_item.get("audience", []), selector_map))
             english_target_groups.update(group for group in expanded if group in english_by_code)
 
     target_groups = set(academic_target_groups)

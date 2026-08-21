@@ -170,7 +170,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_CORE_COURSES_YAML = Path("core-courses-lessons-fall-2026.yaml")
 DEFAULT_ELECTIVES_YAML = Path("electives-lessons-fall-2026.yaml")
 
-# Temporary: emit elective subjects/components without weekly_pattern / occurrences.
+# Temporary: emit elective subjects/components without weekly_pattern / dates_pattern.
 SKIP_ELECTIVE_PATTERNS_AND_OCCURRENCES = True
 
 
@@ -930,7 +930,7 @@ def _collect_instructor_ids_from_components(
                 _add_instructor_ref(ids, pattern.get("instructor"))
                 for edit in pattern.get("edits") or []:
                     _add_instructor_ref(ids, edit.get("instructor"))
-            for occurrence in session.get("occurrences") or []:
+            for occurrence in session.get("dates_pattern") or []:
                 _add_instructor_ref(ids, occurrence.get("instructor"))
     return ids
 
@@ -1103,7 +1103,7 @@ def _core_sessions_from_slots(
             result.append(
                 {
                     "audience": _audience_tokens(group_ids),
-                    "occurrences": occ_by_group[group_ids[0]],
+                    "dates_pattern": occ_by_group[group_ids[0]],
                 }
             )
 
@@ -1193,7 +1193,7 @@ def apply_yaml_style_overrides(node: Any) -> Any:
     if isinstance(node, dict):
         out: dict[str, Any] = {}
         for key, value in node.items():
-            if key in {"instructor_pool", "student_groups"} and isinstance(value, list):
+            if key in {"instructor_pool", "audience"} and isinstance(value, list):
                 out[key] = FlowStyleList(value)
             else:
                 out[key] = apply_yaml_style_overrides(value)
@@ -1419,7 +1419,7 @@ def derive_course_section_code(
     program_to_section, group_to_section = _section_lookup_maps(sections)
     codes: set[str] = set()
     for component in components:
-        tokens = list(component.get("student_groups") or [])
+        tokens = list(component.get("audience") or [])
         for session in component.get("sessions") or []:
             tokens.extend(session.get("audience") or [])
         for token in tokens:
@@ -1552,7 +1552,7 @@ def _collect_meeting_time_pairs(
         for component in course.get("components") or []:
             component_groups = [
                 str(g)
-                for g in (component.get("student_groups") or [])
+                for g in (component.get("audience") or [])
                 if str(g).strip()
             ]
             for session in component.get("sessions") or []:
@@ -1565,7 +1565,7 @@ def _collect_meeting_time_pairs(
                     end = _normalize_hhmm(slot.get("end_time"))
                     if start and end:
                         pairs.append((set(tokens), start, end))
-                for occurrence in session.get("occurrences") or []:
+                for occurrence in session.get("dates_pattern") or []:
                     start = _normalize_hhmm(occurrence.get("start_time"))
                     end = _normalize_hhmm(occurrence.get("end_time"))
                     if start and end:
@@ -1789,7 +1789,7 @@ def class_group_rank(
     selector_map: dict[str, set[str]],
     group_order: dict[str, int],
 ) -> int:
-    groups = cls.get("student_groups", [])
+    groups = cls.get("audience", [])
     if not groups:
         return 10**9
 
@@ -1981,7 +1981,7 @@ def _elective_sessions_from_lessons(
     return [
         {
             "audience": _unique_keep_order(list(audience)),
-            "occurrences": occurrences,
+            "dates_pattern": occurrences,
         }
     ]
 
@@ -2015,12 +2015,12 @@ def _elective_component_from_lessons(
         sessions = _elective_sessions_from_lessons(
             lessons, student_groups, instructors_map, registry
         )
-        meeting_count = len(sessions[0]["occurrences"]) if sessions else 0
+        meeting_count = len(sessions[0]["dates_pattern"]) if sessions else 0
     return {
         "tag": _elective_component_tag(
             representative, shared_for_parallel_groups=shared_for_parallel_groups
         ),
-        "student_groups": _unique_keep_order(list(student_groups)),
+        "audience": _unique_keep_order(list(student_groups)),
         "per_semester": meeting_count
         or max(len(lesson.get("occurrences") or []) for lesson in lessons),
         "instructor_pool": _elective_instructor_pool(teacher_signatures),
@@ -2412,7 +2412,7 @@ def merge_elective_courses(
             components,
             key=lambda cls: (
                 tag_order.get(cls.get("tag", ""), 99),
-                tuple(cls.get("student_groups") or []),
+                tuple(cls.get("audience") or []),
             ),
         )
 
@@ -2672,7 +2672,7 @@ def main() -> None:
             for groups_for_cls, slots_source, signatures_for_pool in emission_variants:
                 cls = {
                     "tag": pattern.class_tag,
-                    "student_groups": _unique_keep_order(
+                    "audience": _unique_keep_order(
                         compress_groups_to_selectors(
                             groups_for_cls, selector_map, group_order
                         )
@@ -2689,7 +2689,7 @@ def main() -> None:
                 )
                 if infer_per_group(
                     pattern.class_tag,
-                    cls["student_groups"],
+                    cls["audience"],
                     source_group_count=len(groups_for_cls),
                     is_shared_lesson=is_shared_lesson,
                 ):
@@ -2697,7 +2697,7 @@ def main() -> None:
                 sessions = _core_sessions_from_slots(
                     groups_for_cls,
                     slots_source,
-                    cls["student_groups"],
+                    cls["audience"],
                     per_group=bool(cls.get("per_group")),
                     occurrences_by_signature=data["occurrences_by_signature"],
                     signatures_for_pool=signatures_for_pool,
