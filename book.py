@@ -1960,7 +1960,7 @@ def cancel_extra_booking(
     token: str,
     target: ExtraCancelTarget,
 ) -> None:
-    url = f"{_api_base_url(api_url).rstrip('/')}/bookings/cancel-extra"
+    url = f"{_api_base_url(api_url).rstrip('/')}/bmp/auto-bookings/cancel-extra"
     body: dict[str, Any] = {
         "room_id": target.room_id,
         "start": target.start,
