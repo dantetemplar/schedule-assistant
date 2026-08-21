@@ -73,12 +73,12 @@ Use this section as a living list of scenarios that affect modeling, input schem
 - `Open questions`: Allowed change budget between step 1 and step 2 (full re-solve vs minimal perturbation), and canonical schema of the uploaded distribution file.
 
 ### Russian-track program with shifted study dates
-- `Status`: draft
+- `Status`: supported (via `program.semester` / parse-core `override.programs`)
 - `Priority`: high
-- `Context`: Russian program starts and ends on dates different from English bachelor programs in the same term.
-- `Expected behavior`: Classes for Russian-track groups are only placed within their own active date window while still respecting shared resources (rooms/instructors) with other programs.
-- `Solver impact`: hard constraint (program availability window per group/program) + preprocessing (derive eligible dates per class instance).
-- `Open questions`: Whether shared courses between Russian and English tracks should use intersection of date windows or be split into separate class instances.
+- `Context`: Programs (including Russian track / different years) may start and end on dates different from `term.semester`.
+- `Expected behavior`: Classes for those groups are only placed within their own active date window while still respecting shared resources (rooms/instructors) with other programs. Joint audiences use the intersection of windows.
+- `Solver impact`: hard constraint (program availability window per group/program) + preprocessing (derive eligible dates per class instance) — solver wiring still roadmap; booking/meetings expansion already uses program windows.
+- `Open questions`: Whether shared courses between tracks with empty intersection should be split into separate class instances.
 
 ### English-stream groups across academic groups
 - `Status`: draft
@@ -387,7 +387,7 @@ These map from UniTime's constraint model (see `docs/REVERSE.md` §3.3, §4) to 
 | 6 | **Required count per subpart** | (structural) | Completeness in `GeneralSolutionComparator` §3.5 | For each class subpart (`tag`), solver places exactly `required_count` meetings (per generated instance when `per_group: true`) |
 | 7 | **Allowed slots** | `allowed_slots` | Domain filtering | Class can only be placed in allowed slot grids |
 | 8 | **Block eligibility** | (not in `ScheduleConfig` yet) | Date-pattern restrictions | Roadmap: dates per block / burst windows |
-| 9 | **Program availability window** | (not in `ScheduleConfig` yet) | Date-pattern restrictions | Roadmap: `starts_from` / `until` per program or group |
+| 9 | **Program availability window** | `program.semester` (optional DateRange) | Date-pattern restrictions | Hard/soft: expand weekly meetings only within `program.semester` (default `term.semester`); joint audiences use intersection |
 
 Additional global soft objectives (same `constraints.weights` map): `minimize_gaps_for_groups`, `instructor_max_per_day`, `time_preference`, `too_big_room`.
 

@@ -225,6 +225,69 @@ def program_track_label(section_name: str, program_name: str) -> str:
     return f"{section_name} / {program_name}"
 
 
+def build_audience_to_program_code(cfg: ScheduleConfig) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for section in cfg.term.sections:
+        for program in section.programs:
+            mapping[f"@{program.code}"] = program.code
+            for group in program.groups:
+                mapping[group] = program.code
+            for track in program.tracks:
+                for group in track.groups:
+                    mapping[group] = program.code
+                mapping[f"@{program.code}/{track.name}"] = program.code
+                mapping[f"@{program.code}/{track.code}"] = program.code
+    return mapping
+
+
+def build_program_semester_by_code(cfg: ScheduleConfig) -> dict[str, TermConfig.DateRange]:
+    by_code: dict[str, TermConfig.DateRange] = {}
+    for section in cfg.term.sections:
+        for program in section.programs:
+            if program.semester is not None:
+                by_code[program.code] = program.semester
+    return by_code
+
+
+def resolve_audience_semester(
+    cfg: ScheduleConfig,
+    audiences: list[str],
+    *,
+    audience_to_program: dict[str, str] | None = None,
+    program_semesters: dict[str, TermConfig.DateRange] | None = None,
+) -> TermConfig.DateRange | None:
+    term = cfg.term
+    if not audiences:
+        return term.semester
+    mapping = audience_to_program if audience_to_program is not None else build_audience_to_program_code(cfg)
+    overrides = program_semesters if program_semesters is not None else build_program_semester_by_code(cfg)
+    windows: list[TermConfig.DateRange] = []
+    for audience in audiences:
+        code = mapping.get(audience.strip())
+        if code and code in overrides:
+            windows.append(overrides[code])
+        else:
+            windows.append(term.semester)
+    start = max(window.start_date for window in windows)
+    end = min(window.end_date for window in windows)
+    if start > end:
+        return None
+    return TermConfig.DateRange(start_date=start, end_date=end)
+
+
+def union_semester_window(cfg: ScheduleConfig) -> TermConfig.DateRange:
+    term = cfg.term
+    start = term.semester.start_date
+    end = term.semester.end_date
+    for section in term.sections:
+        for program in section.programs:
+            if program.semester is None:
+                continue
+            start = min(start, program.semester.start_date)
+            end = max(end, program.semester.end_date)
+    return TermConfig.DateRange(start_date=start, end_date=end)
+
+
 def build_section_program_maps(
     cfg: ScheduleConfig,
 ) -> tuple[dict[str, str], dict[str, str]]:
@@ -330,7 +393,7 @@ def _component_label(component_tag: str, audiences: list[str]) -> str:
     return f"{component_tag} · {audience_text}"
 
 
-def _weekly_recurrence_for_segment(term: TermConfig, day: str, segment_start: date, segment_end: date) -> dict[str, str]:
+def _weekly_recurrence_for_segment(day: str, segment_start: date, segment_end: date) -> dict[str, str]:
     return {
         "kind": "weekly_until",
         "weekday": _weekday_api_value(day),
@@ -339,12 +402,12 @@ def _weekly_recurrence_for_segment(term: TermConfig, day: str, segment_start: da
     }
 
 
-def _weekly_meeting_dates_in_term(term: TermConfig, weekday: str) -> list[date]:
+def _weekly_meeting_dates_in_window(window: TermConfig.DateRange, weekday: str) -> list[date]:
     weekday_api = _weekday_api_value(weekday)
     target = _API_WEEKDAY_TO_PYTHON[weekday_api]
     dates: list[date] = []
-    current = term.semester.start_date
-    end = term.semester.end_date
+    current = window.start_date
+    end = window.end_date
     while current <= end:
         if current.weekday() == target:
             dates.append(current)
@@ -389,10 +452,11 @@ def _resolved_weekly_meeting(
 
 def _recurrence_segments_excluding_edit_weeks(
     term: TermConfig,
+    window: TermConfig.DateRange,
     weekday: str,
     excluded_week_starts: set[date],
 ) -> list[tuple[date, date]]:
-    meeting_dates = _weekly_meeting_dates_in_term(term, weekday)
+    meeting_dates = _weekly_meeting_dates_in_window(window, weekday)
     active_dates = [
         meeting_date
         for meeting_date in meeting_dates
@@ -443,6 +507,7 @@ def _make_slot_row(
 def _slots_from_weekly_pattern(
     pattern: WeeklyPatternSlot,
     term: TermConfig,
+    window: TermConfig.DateRange,
     known_room_ids: set[str],
     *,
     slot_id_prefix: str,
@@ -456,7 +521,7 @@ def _slots_from_weekly_pattern(
 
     slots: list[SlotRow] = []
     excluded_week_starts: set[date] = set()
-    for meeting_date in _weekly_meeting_dates_in_term(term, day_label):
+    for meeting_date in _weekly_meeting_dates_in_window(window, day_label):
         edit = _edit_for_meeting_date(meeting_date, edits, term)
         if edit is None or not _edit_changes_meeting(edit):
             continue
@@ -477,7 +542,7 @@ def _slots_from_weekly_pattern(
         )
 
     for segment_index, (segment_start, segment_end) in enumerate(
-        _recurrence_segments_excluding_edit_weeks(term, day_label, excluded_week_starts)
+        _recurrence_segments_excluding_edit_weeks(term, window, day_label, excluded_week_starts)
     ):
         slots.append(
             _make_slot_row(
@@ -488,7 +553,7 @@ def _slots_from_weekly_pattern(
                 room=base_room,
                 known_room_ids=known_room_ids,
                 recurring=True,
-                recurrence=_weekly_recurrence_for_segment(term, day_label, segment_start, segment_end),
+                recurrence=_weekly_recurrence_for_segment(day_label, segment_start, segment_end),
             )
         )
     return slots
@@ -497,6 +562,7 @@ def _slots_from_weekly_pattern(
 def _slots_from_session(
     session: ComponentSessionSeries,
     term: TermConfig,
+    window: TermConfig.DateRange,
     known_room_ids: set[str],
     *,
     slot_id_prefix: str,
@@ -524,6 +590,7 @@ def _slots_from_session(
             _slots_from_weekly_pattern(
                 pattern,
                 term,
+                window,
                 known_room_ids,
                 slot_id_prefix=slot_id_prefix,
                 pattern_index=index,
@@ -536,6 +603,8 @@ def build_program_groups_from_config(cfg: ScheduleConfig) -> list[ProgramGroup]:
     known_room_ids = {room.id for room in cfg.rooms}
     group_to_program, selector_to_program = build_section_program_maps(cfg)
     token_to_kind = build_token_to_section_kind(cfg)
+    audience_to_program = build_audience_to_program_code(cfg)
+    program_semesters = build_program_semester_by_code(cfg)
     by_program: dict[str, dict[str, list[ComponentNode]]] = defaultdict(lambda: defaultdict(list))
 
     for course in cfg.courses:
@@ -543,6 +612,14 @@ def build_program_groups_from_config(cfg: ScheduleConfig) -> list[ProgramGroup]:
             for session_index, session in enumerate(component.sessions or []):
                 session_audiences = _session_audiences(component, session)
                 if not session_audiences:
+                    continue
+                window = resolve_audience_semester(
+                    cfg,
+                    session_audiences,
+                    audience_to_program=audience_to_program,
+                    program_semesters=program_semesters,
+                )
+                if window is None:
                     continue
                 program_name = _resolve_program_for_audiences(
                     session_audiences,
@@ -554,6 +631,7 @@ def build_program_groups_from_config(cfg: ScheduleConfig) -> list[ProgramGroup]:
                 slots = _slots_from_session(
                     session,
                     cfg.term,
+                    window,
                     known_room_ids,
                     slot_id_prefix=component_id,
                 )
@@ -1668,10 +1746,11 @@ def fetch_existing_bookings_for_config(
         return []
 
     term = cfg.term
-    range_start = datetime.fromisoformat(f"{term.semester.start_date.isoformat()}T00:00:00").replace(
+    bounds = union_semester_window(cfg)
+    range_start = datetime.fromisoformat(f"{bounds.start_date.isoformat()}T00:00:00").replace(
         tzinfo=MSK
     )
-    range_end = datetime.fromisoformat(f"{term.semester.end_date.isoformat()}T23:59:59").replace(
+    range_end = datetime.fromisoformat(f"{bounds.end_date.isoformat()}T23:59:59").replace(
         tzinfo=MSK
     )
 

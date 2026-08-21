@@ -24,7 +24,19 @@ from instructors_roster import (
 
 TERM_NAME = "Fall 2026"
 TERM_START = date(2026, 8, 25)
-TERM_END = date(2026, 12, 24)
+TERM_END = date(2026, 12, 27)
+
+DEFAULT_PARSE_CORE_COURSES_YAML = Path("parse-core-courses.yaml")
+
+# Fallback when parse-core overrides are absent.
+PROGRAM_SEMESTER: dict[str, tuple[date, date]] = {
+    "BS_Y1_EN": (date(2026, 9, 1), TERM_END),
+    "BS_Y1_RU": (date(2026, 9, 1), TERM_END),
+    "BS_Y2_EN": (date(2026, 8, 31), TERM_END),
+    "BS_Y2_RU": (date(2026, 8, 31), TERM_END),
+    "BS_Y3_EN": (date(2026, 8, 24), TERM_END),
+    "BS_Y3_RU": (date(2026, 8, 24), TERM_END),
+}
 
 # Default term grid (must match schedule_config TermConfig.time_slots defaults).
 TERM_TIME_SLOTS: list[tuple[str, str]] = [
@@ -37,6 +49,7 @@ TERM_TIME_SLOTS: list[tuple[str, str]] = [
     ("19:20", "20:50"),
 ]
 TERM_TIME_SLOT_STARTS = {start for start, _ in TERM_TIME_SLOTS}
+TERM_END_BY_START = {start: end for start, end in TERM_TIME_SLOTS}
 
 DEFAULT_INSTRUCTOR_POSITIONS = [
     "Full Professor",
@@ -1557,6 +1570,52 @@ def _collect_meeting_time_pairs(
     return pairs
 
 
+def load_program_semesters_from_parse_core(
+    path: Path | None = None,
+) -> dict[str, tuple[date, date]]:
+    """Read override.programs windows from parse-core-courses.yaml."""
+    parse_path = path or (SCRIPT_DIR / DEFAULT_PARSE_CORE_COURSES_YAML)
+    if not parse_path.is_file():
+        return dict(PROGRAM_SEMESTER)
+
+    raw = yaml.safe_load(parse_path.read_text(encoding="utf-8")) or {}
+    windows: dict[str, tuple[date, date]] = dict(PROGRAM_SEMESTER)
+    for target in raw.get("targets") or []:
+        for override in target.get("override") or []:
+            start_raw = override.get("start_date")
+            end_raw = override.get("end_date")
+            if not start_raw or not end_raw:
+                continue
+            start = date.fromisoformat(str(start_raw)[:10])
+            end = date.fromisoformat(str(end_raw)[:10])
+            for code in override.get("programs") or []:
+                token = str(code).strip()
+                if token:
+                    windows[token] = (start, end)
+    return windows
+
+
+def attach_program_semesters(
+    sections: list[dict[str, Any]],
+    program_semesters: dict[str, tuple[date, date]] | None = None,
+) -> list[dict[str, Any]]:
+    """Attach optional program.semester from parse-core / PROGRAM_SEMESTER map."""
+    windows = program_semesters if program_semesters is not None else load_program_semesters_from_parse_core()
+    for section in sections:
+        for program in section.get("programs") or []:
+            code = str(program.get("code") or "").strip()
+            window = windows.get(code)
+            if window is None:
+                program.pop("semester", None)
+                continue
+            start, end = window
+            program["semester"] = {
+                "start_date": start.isoformat(),
+                "end_date": end.isoformat(),
+            }
+    return sections
+
+
 def program_time_slots_subset_of_term(
     pairs: list[tuple[str, str]] | set[tuple[str, str]],
 ) -> bool:
@@ -1564,6 +1623,14 @@ def program_time_slots_subset_of_term(
     if not pairs:
         return True
     return all(start in TERM_TIME_SLOT_STARTS for start, _end in pairs)
+
+
+def _canonicalize_program_slot_pair(start: str, end: str) -> tuple[str, str]:
+    """Map known term starts to the canonical term end (ignore till/truncation)."""
+    term_end = TERM_END_BY_START.get(start)
+    if term_end is not None:
+        return start, term_end
+    return start, end
 
 
 def attach_program_time_slots(
@@ -1574,6 +1641,8 @@ def attach_program_time_slots(
     """Set each program's time_slots from distinct meeting start/end pairs that touch it.
 
     Skips programs whose collected slots are a subset of term.time_slots (by start).
+    Meetings that start on a term slot use the term end (so till 13:00 does not
+    create a fake 12:40–13:00 program row).
     """
     program_groups: dict[str, set[str]] = {}
     for section in sections:
@@ -1599,17 +1668,18 @@ def attach_program_time_slots(
         code: set() for code in program_groups
     }
     for tokens, start, end in _collect_meeting_time_pairs(course_items):
+        pair = _canonicalize_program_slot_pair(start, end)
         expanded = _expand_audience_tokens(list(tokens), selector_map)
         # Direct @PROGRAM / @PROGRAM/TRACK tokens also map via expansion.
         for code, groups in program_groups.items():
             if not groups:
                 continue
             if expanded & groups:
-                slots_by_program[code].add((start, end))
+                slots_by_program[code].add(pair)
                 continue
             # Audience may still be unresolved selectors for this program.
             if any(str(token).startswith(f"@{code}") for token in tokens):
-                slots_by_program[code].add((start, end))
+                slots_by_program[code].add(pair)
 
     updated = deepcopy(sections)
     for section in updated:
@@ -2715,6 +2785,7 @@ def main() -> None:
         sections_with_slots = attach_program_time_slots(
             sections, course_items, selector_map
         )
+        sections_with_slots = attach_program_semesters(sections_with_slots)
 
         instructors = _normalize_output_instructors(instructors)
         return {
