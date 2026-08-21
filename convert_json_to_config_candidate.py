@@ -170,6 +170,9 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_CORE_COURSES_YAML = Path("core-courses-lessons-fall-2026.yaml")
 DEFAULT_ELECTIVES_YAML = Path("electives-lessons-fall-2026.yaml")
 
+# Temporary: emit elective subjects/components without weekly_pattern / occurrences.
+SKIP_ELECTIVE_PATTERNS_AND_OCCURRENCES = True
+
 
 def _normalize_instructor_position(position: str | None) -> str | None:
     raw = (position or "").strip()
@@ -2002,10 +2005,17 @@ def _elective_component_from_lessons(
         for lesson in lessons
     ]
     representative = lessons[0]
-    sessions = _elective_sessions_from_lessons(
-        lessons, student_groups, instructors_map, registry
-    )
-    meeting_count = len(sessions[0]["occurrences"]) if sessions else 0
+    if SKIP_ELECTIVE_PATTERNS_AND_OCCURRENCES:
+        sessions: list[dict[str, Any]] = []
+        meeting_count = max(
+            (len(lesson.get("occurrences") or []) for lesson in lessons),
+            default=0,
+        )
+    else:
+        sessions = _elective_sessions_from_lessons(
+            lessons, student_groups, instructors_map, registry
+        )
+        meeting_count = len(sessions[0]["occurrences"]) if sessions else 0
     return {
         "tag": _elective_component_tag(
             representative, shared_for_parallel_groups=shared_for_parallel_groups
