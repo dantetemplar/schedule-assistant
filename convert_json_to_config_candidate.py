@@ -23,7 +23,7 @@ from instructors_roster import (
 )
 
 TERM_NAME = "Fall 2026"
-TERM_START = date(2026, 8, 25)
+TERM_START = date(2026, 8, 24)
 TERM_END = date(2026, 12, 27)
 
 DEFAULT_PARSE_CORE_COURSES_YAML = Path("parse-core-courses.yaml")
@@ -356,6 +356,11 @@ PROGRAMS: dict[str, list[dict[str, Any]]] = {
                     "code": "AI360",
                     "groups": ["B25-AI360-01"],
                 },
+                {
+                    "name": "Robotics",
+                    "code": "RO",
+                    "groups": ["B25-RO-01"],
+                },
             ],
         },
         {
@@ -503,6 +508,7 @@ GROUP_ESTIMATED_SIZE: dict[str, int] = {
     "B25-MFAI-04": 26,
     "B25-MFAI-05": 26,
     "B25-MFAI-06": 26,
+    "B25-RO-01": 2,
     "B24-SD-01": 30,
     "B24-SD-02": 27,
     "B24-SD-03": 25,
@@ -668,6 +674,15 @@ def normalize_group_names(
 
 
 _ONLINE_ROOM_LABELS = frozenset({"online", "онлайн"})
+_MODIFIER_ONLY_ROOM_RE = re.compile(
+    r"^(?:"
+    r"(?:ON|ONLY ON|НА|ТОЛЬКО НА|ТОЛЬКО)\s+\d{1,2}[/.]\d{1,2}"
+    r"(?:[,\s]+\d{1,2}[/.]\d{1,2})*"
+    r"|"
+    r"(?:STARTS ON|STARTS FROM|FROM|С|НАЧАЛО С|СТАРТ|СТАРТ С)\s+\d{1,2}[/.]\d{1,2}"
+    r")$",
+    re.IGNORECASE,
+)
 _STARTS_AT_RE = re.compile(
     r"\(?((?:starts?\s+at)|(?:начало\s+в))\s+(\d{1,2}:\d{2})\)?",
     re.IGNORECASE,
@@ -687,6 +702,9 @@ def _normalize_room_value(room: str | None) -> str:
         return ""
     if trimmed.casefold() in _ONLINE_ROOM_LABELS:
         return "ONLINE"
+    # Modifier-only cells ("ТОЛЬКО НА 12/09", "НАЧАЛО С 31/08") are not rooms.
+    if _MODIFIER_ONLY_ROOM_RE.fullmatch(trimmed):
+        return ""
     return trimmed
 
 
