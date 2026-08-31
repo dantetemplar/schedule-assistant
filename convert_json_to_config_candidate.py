@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from openpyxl import load_workbook
 
 from config import InstructorConfig, Weekday
 from instructors_roster import (
@@ -50,6 +51,22 @@ TERM_TIME_SLOTS: list[tuple[str, str]] = [
 ]
 TERM_TIME_SLOT_STARTS = {start for start, _ in TERM_TIME_SLOTS}
 TERM_END_BY_START = {start: end for start, end in TERM_TIME_SLOTS}
+
+ENGLISH_COURSE_NAMES: dict[str, tuple[str, str]] = {
+    "FL": ("Foreign Language", "FL"),
+    "ESP": ("English for Special Purposes", "ESP"),
+    "BRWR": ("Basics of Reading and Writing for Research", "BRWR"),
+    "ESCP": ("English for Scientific Purposes", "EScP"),
+    "AWA-I": ("Academic Writing and Argumentation I", "AWA-I"),
+}
+
+
+def _natural_sort_key(value: str) -> tuple[str | int, ...]:
+    return tuple(
+        int(part) if part.isdigit() else part.casefold()
+        for part in re.split(r"(\d+)", value)
+    )
+
 
 DEFAULT_INSTRUCTOR_POSITIONS = [
     "Full Professor",
@@ -146,6 +163,7 @@ COURSE_ROLE_BY_COMPONENT_TAG: dict[str, tuple[int, str]] = {
     "lecture": (0, "Primary Instructor"),
     "tut": (1, "Secondary Instructor"),
     "tutorial": (1, "Secondary Instructor"),
+    "class": (0, "Primary Instructor"),
     "lab": (2, "Teaching Assistant"),
     "laboratory": (2, "Teaching Assistant"),
 }
@@ -168,9 +186,10 @@ EXCLUDED_ROOM_IDS = {
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_CORE_COURSES_YAML = Path("core-courses-lessons-fall-2026.yaml")
-DEFAULT_ELECTIVES_YAML = Path("electives-lessons-fall-2026.yaml")
+DEFAULT_ENGLISH_XLSX = Path("English Groups.xlsx")
+DEFAULT_ELECTIVES_CONFIG_YAML = Path.home() / "Downloads" / "config(5).yaml"
 
-# Temporary: emit elective subjects/components without weekly_pattern / dates_pattern.
+# Kept for the legacy grouped-electives helpers; mixed-config extraction is used by main.
 SKIP_ELECTIVE_PATTERNS_AND_OCCURRENCES = True
 
 
@@ -262,6 +281,7 @@ PROGRAMS: dict[str, list[dict[str, Any]]] = {
                         "B26-CSE-03",
                         "B26-CSE-04",
                         "B26-CSE-05",
+                        "B26-CSE-06",
                     ],
                 },
                 {
@@ -273,7 +293,6 @@ PROGRAMS: dict[str, list[dict[str, Any]]] = {
                         "B26-DSAI-03",
                         "B26-DSAI-04",
                         "B26-DSAI-05",
-                        "B26-DSAI-06",
                     ],
                 },
             ],
@@ -292,7 +311,6 @@ PROGRAMS: dict[str, list[dict[str, Any]]] = {
                         "B26-MFAI-04",
                         "B26-MFAI-05",
                         "B26-MFAI-06",
-                        "B26-MFAI-07",
                     ],
                 },
                 {
@@ -348,7 +366,6 @@ PROGRAMS: dict[str, list[dict[str, Any]]] = {
                         "B25-MFAI-03",
                         "B25-MFAI-04",
                         "B25-MFAI-05",
-                        "B25-MFAI-06",
                     ],
                 },
                 {
@@ -439,7 +456,7 @@ PROGRAMS: dict[str, list[dict[str, Any]]] = {
                 {
                     "name": "Software Engineering",
                     "code": "SE",
-                    "groups": ["M26-SE-01", "M26-SE-02"],
+                    "groups": ["M26-SE-01"],
                 },
                 {
                     "name": "Secure Systems and Network Engineering",
@@ -476,62 +493,59 @@ GROUP_ESTIMATED_SIZE: dict[str, int] = {
     "B26-CSE-03": 26,
     "B26-CSE-04": 26,
     "B26-CSE-05": 26,
+    "B26-CSE-06": 26,
     "B26-DSAI-01": 26,
     "B26-DSAI-02": 25,
     "B26-DSAI-03": 25,
     "B26-DSAI-04": 25,
     "B26-DSAI-05": 25,
-    "B26-DSAI-06": 25,
     "B26-AI360-01": 18,
-    "B26-MFAI-01": 26,
-    "B26-MFAI-02": 26,
-    "B26-MFAI-03": 26,
-    "B26-MFAI-04": 26,
-    "B26-MFAI-05": 26,
-    "B26-MFAI-06": 26,
-    "B26-MFAI-07": 26,
-    "B26-RO-01": 2,
-    "B25-CSE-01": 29,
-    "B25-CSE-02": 29,
-    "B25-CSE-03": 27,
-    "B25-CSE-04": 27,
-    "B25-CSE-05": 29,
-    "B25-DSAI-01": 28,
-    "B25-DSAI-02": 27,
-    "B25-DSAI-03": 27,
-    "B25-DSAI-04": 28,
-    "B25-DSAI-05": 27,
+    "B26-MFAI-01": 23,
+    "B26-MFAI-02": 23,
+    "B26-MFAI-03": 22,
+    "B26-MFAI-04": 22,
+    "B26-MFAI-05": 22,
+    "B26-MFAI-06": 22,
+    "B26-RO-01": 21,
+    "B25-CSE-01": 24,
+    "B25-CSE-02": 24,
+    "B25-CSE-03": 23,
+    "B25-CSE-04": 21,
+    "B25-CSE-05": 25,
+    "B25-DSAI-01": 26,
+    "B25-DSAI-02": 29,
+    "B25-DSAI-03": 25,
+    "B25-DSAI-04": 24,
+    "B25-DSAI-05": 25,
     "B25-AI360-01": 18,
     "B25-MFAI-01": 26,
     "B25-MFAI-02": 26,
     "B25-MFAI-03": 26,
     "B25-MFAI-04": 26,
     "B25-MFAI-05": 26,
-    "B25-MFAI-06": 26,
     "B25-RO-01": 2,
-    "B24-SD-01": 30,
-    "B24-SD-02": 27,
-    "B24-SD-03": 25,
+    "B24-SD-01": 28,
+    "B24-SD-02": 31,
+    "B24-SD-03": 28,
     "B24-CBS-01": 27,
-    "B24-CBS-02": 26,
+    "B24-CBS-02": 27,
     "B24-CBS-03": 26,
-    "B24-DS-01": 24,
-    "B24-AI-01": 27,
-    "B24-AI-02": 24,
-    "B24-AI-03": 24,
-    "B24-GD-01": 16,
-    "B24-RO-01": 14,
-    "B24-MFAI-01": 24,
+    "B24-DS-01": 28,
+    "B24-AI-01": 30,
+    "B24-AI-02": 30,
+    "B24-AI-03": 26,
+    "B24-GD-01": 18,
+    "B24-RO-01": 8,
+    "B24-MFAI-01": 18,
     "B24-MFAI-02": 24,
-    "B24-MFAI-03": 24,
-    "B24-MFAI-04": 16,
+    "B24-MFAI-03": 21,
+    "B24-MFAI-04": 14,
     "B24-AI360-01": 10,
-    "M26-AIDE-01": 27,
-    "M26-RO-01": 14,
-    "M26-SE-01": 18,
-    "M26-SE-02": 17,
+    "M26-AIDE-01": 24,
+    "M26-RO-01": 12,
+    "M26-SE-01": 32,
     "M26-SNE-01": 21,
-    "M26-TE-01": 11,
+    "M26-TE-01": 18,
     "PhD": 25,
 }
 
@@ -614,6 +628,7 @@ def is_english_course(lesson_name: str) -> bool:
 
 
 _ACADEMIC_GROUP_ID_FIXES: dict[str, str] = {
+    "B26-RO15-01": "B26-RO-01",
     "M26-RO-": "M26-RO-01",
     "M26-RO15-01": "M26-RO-01",
 }
@@ -1254,8 +1269,9 @@ def parse_room_survey_pdf_text(text: str) -> dict[str, dict[str, str]]:
         for line in lines[1:]:
             field_match = field_re.match(line)
             if field_match is not None:
-                current_field = field_match.group(1)
-                fields[current_field] = field_match.group(2).strip()
+                field_name = field_match.group(1)
+                current_field = field_name
+                fields[field_name] = field_match.group(2).strip()
                 continue
             if current_field is None:
                 continue
@@ -1525,7 +1541,7 @@ def build_sections(programs: dict[str, list[dict[str, Any]]]) -> list[dict[str, 
         {
             "code": "english",
             "name": "Английский",
-            "default_layout": "groups",
+            "default_layout": "compact_groups",
             "programs": [deepcopy(ENGLISH_PROGRAM)],
         },
         {
@@ -2287,9 +2303,36 @@ def expand_grouped_core_courses_to_rows(
     payload: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
+    program_by_group = {
+        group: program["code"]
+        for programs in PROGRAMS.values()
+        for program in programs
+        for track in program.get("tracks", [])
+        for group in track.get("groups", [])
+    }
     for course in payload:
         subject = course["subject"]
+        sheet_name = str(course.get("google_sheet_name") or "").strip().casefold()
+        expected_language = (
+            "RU"
+            if "ru program" in sheet_name
+            else "EN"
+            if sheet_name
+            else None
+        )
         for component in course["components"]:
+            audience = normalize_group_names(component["audience"])
+            if expected_language is not None:
+                audience = [
+                    group
+                    for group in audience
+                    if not (
+                        (program_by_group.get(group) or "").endswith(("_EN", "_RU"))
+                        and not (program_by_group[group]).endswith(f"_{expected_language}")
+                    )
+                ]
+            if not audience:
+                continue
             rows.append(
                 {
                     "lesson_name": subject,
@@ -2299,12 +2342,85 @@ def expand_grouped_core_courses_to_rows(
                     "end_time": component["end_time"],
                     "room": component.get("room"),
                     "teacher": component.get("instructor"),
-                    "group_name": normalize_group_names(component["audience"]),
+                    "group_name": audience,
                     "students_number": component.get("students_number"),
                     "modifiers": component.get("modifiers"),
                 }
             )
     return rows
+
+
+def collapse_spanning_core_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge spreadsheet rows bounded by STARTS AT and TILL into one meeting."""
+    grouped: dict[tuple[Any, ...], list[tuple[int, dict[str, Any]]]] = defaultdict(
+        list
+    )
+    for index, row in enumerate(rows):
+        grouped[
+            (
+                normalize_lesson_name(row["lesson_name"]),
+                normalize_class_tag(row.get("lesson_class_type")),
+                row["weekday"],
+                str(row.get("teacher") or "").strip(),
+                tuple(normalize_group_names(row.get("group_name"))),
+                _normalize_room_value(row.get("room")),
+            )
+        ].append((index, row))
+
+    replacements: dict[int, dict[str, Any]] = {}
+    removed: set[int] = set()
+    for indexed_rows in grouped.values():
+        ordered = sorted(
+            indexed_rows,
+            key=lambda item: _time_to_minutes(str(item[1]["start_time"])),
+        )
+        start_position = 0
+        while start_position < len(ordered):
+            start_index, start_row = ordered[start_position]
+            start_modifiers = start_row.get("modifiers") or {}
+            if not start_modifiers.get("starts_at"):
+                start_position += 1
+                continue
+
+            end_position = next(
+                (
+                    position
+                    for position in range(start_position + 1, len(ordered))
+                    if (ordered[position][1].get("modifiers") or {}).get("till")
+                ),
+                None,
+            )
+            if end_position is None:
+                start_position += 1
+                continue
+
+            _, end_row = ordered[end_position]
+            end_modifiers = end_row.get("modifiers") or {}
+            merged = deepcopy(start_row)
+            merged["start_time"] = normalize_time(start_modifiers["starts_at"])
+            merged["end_time"] = normalize_time(end_modifiers["till"])
+            merged["modifiers"] = {
+                key: value
+                for key, value in start_modifiers.items()
+                if key not in {"starts_at", "till"}
+            }
+            merged["a1_range"] = ";".join(
+                str(row.get("a1_range"))
+                for _, row in ordered[start_position : end_position + 1]
+                if row.get("a1_range")
+            )
+            replacements[start_index] = merged
+            removed.update(
+                index
+                for index, _ in ordered[start_position + 1 : end_position + 1]
+            )
+            start_position = end_position + 1
+
+    return [
+        replacements.get(index, row)
+        for index, row in enumerate(rows)
+        if index not in removed
+    ]
 
 
 def load_core_courses_file(path: Path) -> list[dict[str, Any]]:
@@ -2335,7 +2451,7 @@ def load_core_courses_file(path: Path) -> list[dict[str, Any]]:
                     raise ValueError(
                         f"Core courses entry {index} component {comp_index} missing required field: {key}"
                     )
-    return expand_grouped_core_courses_to_rows(payload)
+    return collapse_spanning_core_rows(expand_grouped_core_courses_to_rows(payload))
 
 
 def _elective_instructor_pool(
@@ -2435,9 +2551,436 @@ def merge_elective_courses(
         )
 
 
+_ENGLISH_DAY_PAIRS = {
+    "M/W": ("MONDAY", "WEDNESDAY"),
+    "T/TH": ("TUESDAY", "THURSDAY"),
+}
+
+_ENGLISH_INSTRUCTOR_IDS = {
+    "Valeria Tishkova": "v.tishkova@innopolis.ru",
+    "Alexandra Vasilieva": "a.vasilyeva@innopolis.ru",
+    "Alina Arslanova": "a.arslanova@innopolis.ru",
+    "Anna Startseva": "an.startseva@innopolis.university",
+    "Elvira Kharassova": "e.kharrasova@innopolis.ru",
+    "Evgenia Kruglova": "e.kruglova@innopolis.ru",
+    "Georgy Gelvanovsky": "g.gelvanovsky@innopolis.ru",
+    "Irina Rednikova": "i.rednikova@innopolis.ru",
+    "Kamilla Sakhabieva": "k.sakhabieva@innopolis.ru",
+    "Maria Melnikova": "m.melnikova@innopolis.ru",
+    "Ruslan Saduov": "ru.saduov@innopolis.ru",
+}
+
+
+def _english_group_code(value: Any) -> str:
+    token = " ".join(str(value or "").split())
+    match = re.fullmatch(r"(.+?)[ -]?(\d+)", token)
+    if match is None:
+        return token.replace(" ", "-")
+    prefix = match.group(1).strip().upper()
+    if prefix == "FL":
+        return f"FL-{match.group(2)}"
+    return f"{prefix}-{match.group(2)}"
+
+
+def load_english_schedule(path: Path) -> dict[str, Any]:
+    workbook = load_workbook(path, read_only=True, data_only=True)
+    if "Grouping" not in workbook.sheetnames:
+        raise ValueError(f"English workbook {path} has no 'Grouping' sheet")
+    sheet = workbook["Grouping"]
+    rows = sheet.iter_rows(values_only=True)
+    headers = next(rows, None)
+    if headers is None:
+        raise ValueError(f"English workbook {path} is empty")
+    columns = {
+        str(value).strip(): index
+        for index, value in enumerate(headers)
+        if value is not None and str(value).strip()
+    }
+    required = {
+        "Доменный идентификатор",
+        "Учебная группа",
+        "English Course",
+        "English Group",
+        "Instructor",
+        "Instructor email",
+        "Day",
+        "Time",
+        "Room",
+    }
+    missing_columns = sorted(required - columns.keys())
+    if missing_columns:
+        raise ValueError(
+            f"English workbook {path} missing columns: {', '.join(missing_columns)}"
+        )
+
+    groups: dict[str, dict[str, Any]] = {}
+    student_group_by_id: dict[str, str] = {}
+    diagnostics: list[str] = []
+    for row_number, row in enumerate(rows, 2):
+        raw_group = row[columns["English Group"]]
+        if raw_group is None or not str(raw_group).strip():
+            continue
+        group_code = _english_group_code(raw_group)
+        student_id = str(row[columns["Доменный идентификатор"]] or "").strip()
+        academic_group = normalize_academic_group_id(
+            str(row[columns["Учебная группа"]] or "")
+        )
+        course_name = " ".join(
+            str(row[columns["English Course"]] or "").split()
+        ).upper()
+        instructor = " ".join(str(row[columns["Instructor"]] or "").split())
+        instructor_email = str(
+            row[columns["Instructor email"]] or ""
+        ).strip().lower()
+        day_token = " ".join(str(row[columns["Day"]] or "").split()).upper()
+        start_time = normalize_time(str(row[columns["Time"]] or ""))
+        room = _normalize_room_value(str(row[columns["Room"]] or ""))
+
+        if not student_id:
+            diagnostics.append(
+                f"English row {row_number} ({group_code}) has no student ID"
+            )
+        else:
+            previous_group = student_group_by_id.get(student_id)
+            if previous_group and previous_group != group_code:
+                diagnostics.append(
+                    f"English student {student_id} appears in both "
+                    f"{previous_group} and {group_code}; keeping {previous_group}"
+                )
+                student_id = ""
+            else:
+                student_group_by_id[student_id] = group_code
+
+        weekdays = _ENGLISH_DAY_PAIRS.get(day_token)
+        if weekdays is None:
+            raise ValueError(
+                f"English row {row_number} has unsupported day pair {day_token!r}"
+            )
+        end_time = TERM_END_BY_START.get(start_time)
+        if end_time is None:
+            raise ValueError(
+                f"English row {row_number} has unsupported start time {start_time!r}"
+            )
+        schedule_key = (
+            course_name,
+            instructor,
+            instructor_email,
+            day_token,
+            start_time,
+            room,
+        )
+        group = groups.setdefault(
+            group_code,
+            {
+                "code": group_code,
+                "course_name": course_name,
+                "students": [],
+                "academic_groups": set(),
+                "schedule_counts": defaultdict(int),
+            },
+        )
+        if group["course_name"] != course_name:
+            raise ValueError(
+                f"English group {group_code} has conflicting courses: "
+                f"{group['course_name']!r} and {course_name!r}"
+            )
+        if student_id and student_id not in group["students"]:
+            group["students"].append(student_id)
+        if academic_group:
+            group["academic_groups"].add(academic_group)
+        group["schedule_counts"][schedule_key] += 1
+
+    parsed_groups: list[dict[str, Any]] = []
+    for group_code, group in sorted(
+        groups.items(), key=lambda item: _natural_sort_key(item[0])
+    ):
+        schedule_counts = group.pop("schedule_counts")
+        schedule_key, count = max(
+            schedule_counts.items(),
+            key=lambda item: (item[1], item[0]),
+        )
+        if len(schedule_counts) > 1:
+            diagnostics.append(
+                f"English group {group_code} has conflicting schedule rows; "
+                f"using {schedule_key!r} ({count}/{sum(schedule_counts.values())} rows)"
+            )
+        (
+            course_name,
+            instructor,
+            instructor_email,
+            day_token,
+            start_time,
+            room,
+        ) = schedule_key
+        group["instructor"] = instructor
+        group["instructor_email"] = instructor_email
+        group["weekly_pattern"] = [
+            {
+                "weekday": weekday,
+                "start_time": start_time,
+                "end_time": TERM_END_BY_START[start_time],
+                "room": room or None,
+            }
+            for weekday in _ENGLISH_DAY_PAIRS[day_token]
+        ]
+        group["academic_groups"] = sorted(group["academic_groups"])
+        parsed_groups.append(group)
+    return {"groups": parsed_groups, "diagnostics": diagnostics}
+
+
+def build_english_entities(
+    parsed: dict[str, Any],
+    instructors_map: dict[str, InstructorConfig],
+    registry: InstructorRegistry,
+) -> dict[str, Any]:
+    tracks: dict[str, list[str]] = defaultdict(list)
+    courses: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    student_groups: list[dict[str, Any]] = []
+    instructor_ids: set[str] = set()
+    for group in parsed["groups"]:
+        group_code = group["code"]
+        course_code = group["course_name"]
+        if course_code not in ENGLISH_COURSE_NAMES:
+            raise ValueError(f"Unsupported English course code {course_code!r}")
+        tracks[course_code].append(group_code)
+        student_groups.append(
+            {
+                "code": group_code,
+                "kind": "english",
+                "name": group_code,
+                "estimated_size": len(group["students"]),
+                "students": list(group["students"]),
+            }
+        )
+        instructor_name = group["instructor"]
+        expected_instructor_id = _ENGLISH_INSTRUCTOR_IDS.get(instructor_name)
+        if expected_instructor_id is None:
+            raise ValueError(
+                f"English instructor {instructor_name!r} has no canonical ID mapping"
+            )
+        instructor_id = group["instructor_email"]
+        if instructor_id != expected_instructor_id:
+            raise ValueError(
+                f"English instructor {instructor_name!r} has unexpected email "
+                f"{instructor_id!r}; expected {expected_instructor_id!r}"
+            )
+        instructor = registry.by_id.get(instructor_id)
+        if instructor is None:
+            raise ValueError(
+                f"English instructor {instructor_name!r} is missing from instructors roster: "
+                f"{instructor_id}"
+            )
+        instructors_map[instructor_id] = instructor.model_copy(
+            update={"name_en": instructor_name}
+        )
+        instructor_ids.add(instructor_id)
+        weekly_pattern = deepcopy(group["weekly_pattern"])
+        for slot in weekly_pattern:
+            slot["instructor"] = instructor_id
+        courses[course_code].append(
+            {
+                "tag": "class",
+                "audience": [group_code],
+                "instructor_pool": [instructor_id],
+                "sessions": [
+                    {
+                        "audience": [group_code],
+                        "weekly_pattern": weekly_pattern,
+                    }
+                ],
+            }
+        )
+
+    section = {
+        "code": "english",
+        "name": "Английский",
+        "default_layout": "compact_groups",
+        "programs": [
+            {
+                "code": "ENGLISH_YEAR1",
+                "name": "English",
+                "tracks": [
+                    {"code": _slug_code(name).upper(), "name": name, "groups": groups}
+                    for name, groups in sorted(tracks.items())
+                ],
+            }
+        ],
+    }
+    course_items = []
+    for course_code, components in sorted(courses.items()):
+        course_name, course_short_name = ENGLISH_COURSE_NAMES[course_code]
+        course_items.append(
+            {
+                "name": course_name,
+                "short_name": course_short_name,
+                "section_code": "english",
+                "components": components,
+                "instructors": _derive_course_instructors(components),
+            }
+        )
+    return {
+        "section": section,
+        "students_groups": student_groups,
+        "courses": course_items,
+        "instructors": [
+            (
+                instructors_map.get(instructor_id)
+                or registry.by_id[instructor_id]
+            ).model_dump(mode="json", exclude_none=True)
+            for instructor_id in sorted(instructor_ids)
+        ],
+    }
+
+
+def _strip_slot_preferences(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _strip_slot_preferences(item)
+            for key, item in value.items()
+            if key != "slot_preferences"
+        }
+    if isinstance(value, list):
+        return [_strip_slot_preferences(item) for item in value]
+    return value
+
+
+def _collect_course_entity_refs(
+    courses: list[dict[str, Any]],
+) -> tuple[set[str], set[str]]:
+    room_ids: set[str] = set()
+    instructor_ids: set[str] = set()
+
+    def visit(value: Any, key: str = "") -> None:
+        if isinstance(value, dict):
+            for child_key, child in value.items():
+                if child_key == "room" and child:
+                    room_ids.add(str(child))
+                elif child_key == "instructor" and child:
+                    if isinstance(child, list):
+                        instructor_ids.update(str(item) for item in child)
+                    else:
+                        instructor_ids.add(str(child))
+                elif child_key == "instructor_pool":
+                    for item in _iter_pool_instructor_ids(list(child or [])):
+                        instructor_ids.add(item)
+                visit(child, child_key)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child, key)
+
+    visit(courses)
+    for course in courses:
+        for instructor in course.get("instructors") or []:
+            instructor_id = str(instructor.get("id") or "").strip()
+            if instructor_id:
+                instructor_ids.add(instructor_id)
+    return room_ids, instructor_ids
+
+
+def extract_elective_entities(path: Path) -> dict[str, Any]:
+    payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    courses = [
+        _strip_slot_preferences(deepcopy(course))
+        for course in payload.get("courses") or []
+        if course.get("section_code") == "electives"
+    ]
+    student_groups = [
+        _strip_slot_preferences(deepcopy(group))
+        for group in payload.get("students_groups") or []
+        if group.get("kind") == "elective"
+    ]
+    sections = [
+        _strip_slot_preferences(deepcopy(section))
+        for section in (payload.get("term") or {}).get("sections") or []
+        if section.get("code") == "electives"
+    ]
+    room_ids, instructor_ids = _collect_course_entity_refs(courses)
+    rooms = [
+        _strip_slot_preferences(deepcopy(room))
+        for room in payload.get("rooms") or []
+        if str(room.get("id")) in room_ids
+    ]
+    instructors = [
+        _strip_slot_preferences(deepcopy(instructor))
+        for instructor in payload.get("instructors") or []
+        if str(instructor.get("id")) in instructor_ids
+    ]
+    return {
+        "sections": sections,
+        "courses": courses,
+        "students_groups": student_groups,
+        "rooms": rooms,
+        "instructors": instructors,
+    }
+
+
+def _merge_keyed(
+    *sources: list[dict[str, Any]],
+    key: Any,
+) -> list[dict[str, Any]]:
+    merged: dict[Any, dict[str, Any]] = {}
+    order: list[Any] = []
+    for source in sources:
+        for item in source:
+            item_key = key(item)
+            if item_key not in merged:
+                order.append(item_key)
+            merged[item_key] = deepcopy(item)
+    return [merged[item_key] for item_key in order]
+
+
+def merge_schedule_entities(
+    generated: dict[str, Any],
+    english: dict[str, Any],
+    electives: dict[str, Any],
+) -> dict[str, Any]:
+    merged = deepcopy(generated)
+    merged["term"]["sections"] = _merge_keyed(
+        generated["term"].get("sections") or [],
+        [english["section"]],
+        electives["sections"],
+        key=lambda item: item["code"],
+    )
+    merged["students_groups"] = _merge_keyed(
+        generated.get("students_groups") or [],
+        english["students_groups"],
+        electives["students_groups"],
+        key=lambda item: item["code"],
+    )
+    merged["courses"] = _merge_keyed(
+        generated.get("courses") or [],
+        english["courses"],
+        electives["courses"],
+        key=lambda item: (
+            item["section_code"],
+            item.get("short_name") or item["name"],
+        ),
+    )
+    merged["rooms"] = _merge_keyed(
+        generated.get("rooms") or [],
+        electives["rooms"],
+        key=lambda item: str(item["id"]),
+    )
+    referenced_rooms, _ = _collect_course_entity_refs(merged["courses"])
+    if "ONLINE" in referenced_rooms and not any(
+        str(room["id"]) == "ONLINE" for room in merged["rooms"]
+    ):
+        merged["rooms"].append(
+            {"id": "ONLINE", "name": "Online", "features": {}}
+        )
+    merged["instructors"] = _merge_keyed(
+        generated.get("instructors") or [],
+        english["instructors"],
+        electives["instructors"],
+        key=lambda item: str(item["id"]),
+    )
+    merged["instructors"] = _normalize_output_instructors(merged["instructors"])
+    return _strip_slot_preferences(merged)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Convert core-courses and elective lessons YAML into config-candidate.yaml"
+        description="Merge core YAML, English XLSX, and elective config into one schedule config"
     )
     parser.add_argument(
         "core_courses_yaml",
@@ -2447,11 +2990,18 @@ def main() -> None:
         help=f"Grouped core courses lessons YAML (default: {DEFAULT_CORE_COURSES_YAML.name})",
     )
     parser.add_argument(
-        "electives_yaml",
+        "english_xlsx",
         type=Path,
         nargs="?",
-        default=DEFAULT_ELECTIVES_YAML,
-        help=f"Grouped electives lessons YAML (default: {DEFAULT_ELECTIVES_YAML.name})",
+        default=DEFAULT_ENGLISH_XLSX,
+        help=f"English schedule XLSX (default: {DEFAULT_ENGLISH_XLSX.name})",
+    )
+    parser.add_argument(
+        "electives_config_yaml",
+        type=Path,
+        nargs="?",
+        default=DEFAULT_ELECTIVES_CONFIG_YAML,
+        help=f"Mixed config containing authoritative electives (default: {DEFAULT_ELECTIVES_CONFIG_YAML})",
     )
     parser.add_argument(
         "output_yaml", type=Path, nargs="?", default=Path("config-candidate.yaml")
@@ -2484,14 +3034,14 @@ def main() -> None:
 
     search_dirs = resolve_lessons_search_dirs(args.core_courses_yaml)
     core_courses_path = resolve_data_path(args.core_courses_yaml, *search_dirs)
-    electives_path = resolve_data_path(args.electives_yaml, *search_dirs)
+    english_path = resolve_data_path(args.english_xlsx, *search_dirs)
+    electives_path = resolve_data_path(args.electives_config_yaml, *search_dirs)
 
     rows: list[dict[str, Any]] = load_core_courses_file(core_courses_path)
-    grouped_elective_lessons: list[dict[str, Any]] = []
-    if electives_path.exists():
-        grouped_elective_lessons = load_grouped_elective_lessons(electives_path)
-    if not rows and not grouped_elective_lessons:
-        raise ValueError("Core courses and electives inputs are both empty")
+    if not rows:
+        raise ValueError("Core courses input is empty")
+    english_schedule = load_english_schedule(english_path)
+    elective_entities = extract_elective_entities(electives_path)
 
     rooms_json_path = resolve_data_path(args.rooms_json, *search_dirs)
     room_survey_json_path = resolve_data_path(args.room_survey_json, *search_dirs)
@@ -2519,21 +3069,8 @@ def main() -> None:
     rooms = load_rooms(rooms_json_path, survey_features=room_survey_features)
 
     academic_groups = collect_academic_groups(PROGRAMS)
-    elective_alias_by_subject = load_elective_alias_by_subject(search_dirs)
-    elective_student_groups = collect_elective_student_groups(
-        grouped_elective_lessons,
-        alias_by_subject=elective_alias_by_subject,
-    )
     sections = build_sections(PROGRAMS)
-    if grouped_elective_lessons:
-        sections = append_electives_to_sections(
-            sections,
-            grouped_elective_lessons,
-            alias_by_subject=elective_alias_by_subject,
-        )
     students_groups = build_students_groups(academic_groups)
-    students_groups.extend(collect_english_groups())
-    students_groups.extend(elective_student_groups)
 
     instructors_map: dict[str, InstructorConfig] = {}
     aggregated: dict[PatternKey, dict[str, Any]] = {}
@@ -2727,16 +3264,6 @@ def main() -> None:
                     cls["sessions"] = sessions
                 courses_map[pattern.course].append(cls)
 
-        merge_elective_courses(
-            courses_map,
-            course_is_elective,
-            grouped_elective_lessons,
-            instructors_map,
-            instructor_registry,
-            course_short_names,
-            alias_by_subject=elective_alias_by_subject,
-        )
-
         for course_name, components in courses_map.items():
             courses_map[course_name] = sorted(
                 components,
@@ -2835,8 +3362,17 @@ def main() -> None:
             "courses": course_items,
         }
 
-    styled_config = apply_yaml_style_overrides(render_config(rows))
+    generated_config = render_config(rows)
+    english_entities = build_english_entities(
+        english_schedule, instructors_map, instructor_registry
+    )
+    merged_config = merge_schedule_entities(
+        generated_config, english_entities, elective_entities
+    )
+    styled_config = apply_yaml_style_overrides(merged_config)
     args.output_yaml.write_text(dump_config_yaml(styled_config), encoding="utf-8")
+    for diagnostic in english_schedule["diagnostics"]:
+        print(f"Warning: {diagnostic}")
     print(f"Wrote {args.output_yaml}")
 
 
