@@ -2799,6 +2799,10 @@ def build_english_entities(
             {
                 "code": "ENGLISH_YEAR1",
                 "name": "English",
+                "semester": {
+                    "start_date": PROGRAM_SEMESTER["BS_Y1_EN"][0].isoformat(),
+                    "end_date": PROGRAM_SEMESTER["BS_Y1_EN"][1].isoformat(),
+                },
                 "tracks": [
                     {"code": _slug_code(name).upper(), "name": name, "groups": groups}
                     for name, groups in sorted(tracks.items())
