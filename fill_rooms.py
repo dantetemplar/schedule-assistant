@@ -6,14 +6,14 @@
 # ]
 # ///
 
-input_filename = "BS intake 2026 grouping v2 290826.xlsx"
+input_filename = "BS intake 2026 grouping v2 310826.xlsx"
 output_filename = "English Groups.xlsx"
 
+from collections import Counter, defaultdict
 from datetime import datetime, time
 
 from openpyxl import load_workbook
 from openpyxl.cell.cell import Cell
-
 
 instructor_names = {
     "Valeria": "Valeria Tishkova",
@@ -82,8 +82,7 @@ rooms = {
 room_instructor_names = {
     full_name: short_name
     for short_name, full_name in instructor_names.items()
-    if short_name != "Kamilla"
-    and any(key.endswith(f" {short_name}") for key in rooms)
+    if short_name != "Kamilla" and any(key.endswith(f" {short_name}") for key in rooms)
 }
 
 
@@ -91,6 +90,65 @@ def format_time(value: object) -> str:
     if isinstance(value, (datetime, time)):
         return value.strftime("%H:%M")
     return str(value).strip()
+
+
+def clean_grouping_sheet(workbook) -> tuple[int, int]:
+    sheet = workbook["Grouping"]
+    columns = {
+        str(cell.value).strip(): cell.column
+        for cell in sheet[1]
+        if cell.value is not None
+    }
+
+    seen_student_ids: set[str] = set()
+    duplicate_rows: list[int] = []
+    for row_number in range(2, sheet.max_row + 1):
+        student_id = str(
+            sheet.cell(row_number, columns["Доменный идентификатор"]).value or ""
+        ).strip()
+        if not student_id:
+            continue
+        if student_id in seen_student_ids:
+            duplicate_rows.append(row_number)
+            continue
+        seen_student_ids.add(student_id)
+
+    for row_number in reversed(duplicate_rows):
+        sheet.delete_rows(row_number)
+
+    rows_by_group: dict[str, list[int]] = defaultdict(list)
+    for row_number in range(2, sheet.max_row + 1):
+        group = str(
+            sheet.cell(row_number, columns["English Group"]).value or ""
+        ).strip()
+        if group:
+            rows_by_group[group].append(row_number)
+
+    normalized_rows = 0
+    schedule_columns = [
+        "English Course",
+        "Instructor",
+        "Instructor email",
+        "Day",
+        "Time",
+        "Room",
+    ]
+    for row_numbers in rows_by_group.values():
+        signatures = [
+            tuple(
+                sheet.cell(row_number, columns[name]).value for name in schedule_columns
+            )
+            for row_number in row_numbers
+        ]
+        canonical = Counter(signatures).most_common(1)[0][0]
+        for row_number, signature in zip(row_numbers, signatures, strict=True):
+            if signature == canonical:
+                continue
+            for name, value in zip(schedule_columns, canonical, strict=True):
+                sheet.cell(row_number, columns[name]).value = value
+            normalized_rows += 1
+
+    return len(duplicate_rows), normalized_rows
 
 
 def main() -> None:
@@ -144,10 +202,7 @@ def main() -> None:
             room_instructor = room_instructor_names.get(
                 instructor_token, instructor_token
             )
-            key = (
-                f"{str(day).strip()} {format_time(lesson_time)} "
-                f"{room_instructor}"
-            )
+            key = f"{str(day).strip()} {format_time(lesson_time)} {room_instructor}"
             if key not in rooms:
                 raise KeyError(f"Room is not specified for row {row_number}: {key}")
 
@@ -181,8 +236,12 @@ def main() -> None:
     if filled_rooms == 0:
         raise RuntimeError("No rows from the people list were found")
 
+    removed_duplicates, normalized_rows = clean_grouping_sheet(workbook)
     workbook.save(output_filename)
-    print(f"Filled {filled_rooms} rooms. Saved to {output_filename}")
+    print(
+        f"Filled {filled_rooms} rooms, removed {removed_duplicates} duplicate students, "
+        f"normalized {normalized_rows} group rows. Saved to {output_filename}"
+    )
 
 
 if __name__ == "__main__":
