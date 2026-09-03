@@ -19,7 +19,7 @@ def _group_codes_from_entries(entries: list | None) -> set[str]:
 
 def _build_selector_map(raw_cfg: dict) -> dict[str, set[str]]:
     selector_map: dict[str, set[str]] = {}
-    for section in raw_cfg.get("sections", []):
+    for section in _sections(raw_cfg):
         for program in section.get("programs", []):
             program_code = program.get("code")
             if not program_code:
@@ -44,12 +44,37 @@ def _expand_groups(tokens: list[str], selector_map: dict[str, set[str]]) -> list
     return sorted(out)
 
 
-def _index_distribution_by_kind(cfg: dict, kind: str) -> dict[str, dict]:
-    return {
-        item["code"]: item
-        for item in cfg.get("students_groups", [])
-        if item.get("kind") == kind and item.get("code")
-    }
+def _sections(cfg: dict) -> list[dict]:
+    return list(cfg.get("sections") or (cfg.get("term") or {}).get("sections") or [])
+
+
+def _section_by_code(cfg: dict, section_code: str) -> dict | None:
+    return next(
+        (
+            section
+            for section in _sections(cfg)
+            if str(section.get("code") or "").strip().lower() == section_code
+        ),
+        None,
+    )
+
+
+def _section_group_codes(section: dict | None) -> set[str]:
+    groups: set[str] = set()
+    if section is None:
+        return groups
+    for program in section.get("programs", []):
+        groups.update(_group_codes_from_entries(program.get("groups")))
+        for track in program.get("tracks", []):
+            groups.update(_group_codes_from_entries(track.get("groups")))
+    return groups
+
+
+def _students_groups_without_kind(cfg: dict) -> list[dict]:
+    return [
+        {key: value for key, value in group.items() if key != "kind"}
+        for group in cfg.get("students_groups", [])
+    ]
 
 
 def _base_case_cfg(cfg: dict) -> dict:
@@ -59,7 +84,9 @@ def _base_case_cfg(cfg: dict) -> dict:
     return case_cfg
 
 
-def _filter_courses(cfg: dict, selector_map: dict[str, set[str]], target_groups: set[str]) -> list[dict]:
+def _filter_courses(
+    cfg: dict, selector_map: dict[str, set[str]], target_groups: set[str]
+) -> list[dict]:
     filtered_courses: list[dict] = []
     for course_item in cfg.get("courses", []):
         filtered_components = []
@@ -85,14 +112,12 @@ def _generate_program_year_cases(candidate_path: Path, output_dir: Path) -> None
         cfg = yaml.safe_load(f)
 
     selector_map = _build_selector_map(cfg)
-    core_by_code = _index_distribution_by_kind(cfg, "core")
-    english_by_code = _index_distribution_by_kind(cfg, "english")
+    english_group_codes = _section_group_codes(_section_by_code(cfg, "english"))
 
     for old_case in output_dir.glob("*.yaml"):
         old_case.unlink()
 
-    sections = cfg.get("sections", [])
-    core_section = next((s for s in sections if s.get("code") == "core"), {"programs": []})
+    core_section = _section_by_code(cfg, "core") or {"programs": []}
     grouped_by_year: dict[int, list[dict]] = {}
     for program in core_section.get("programs", []):
         year = program.get("year")
@@ -103,27 +128,37 @@ def _generate_program_year_cases(candidate_path: Path, output_dir: Path) -> None
     for year, year_programs in grouped_by_year.items():
         target_group_candidates: set[str] = set()
         for program in year_programs:
-            target_group_candidates.update(_group_codes_from_entries(program.get("groups")))
+            target_group_candidates.update(
+                _group_codes_from_entries(program.get("groups"))
+            )
             for track in program.get("tracks", []):
-                target_group_candidates.update(_group_codes_from_entries(track.get("groups")))
-        target_group_candidates.intersection_update(core_by_code.keys())
+                target_group_candidates.update(
+                    _group_codes_from_entries(track.get("groups"))
+                )
         target_groups = set(target_group_candidates)
-        if year == 1 and english_by_code:
+        if year == 1 and english_group_codes:
             english_target_groups: set[str] = set()
             for course_item in cfg.get("courses", []):
                 course_name = str(course_item.get("name", "")).strip().lower()
-                if "english" not in course_name and "foreign language" not in course_name:
+                if (
+                    "english" not in course_name
+                    and "foreign language" not in course_name
+                ):
                     continue
                 for comp_item in course_item.get("components", []):
-                    expanded = set(_expand_groups(comp_item.get("audience", []), selector_map))
-                    english_target_groups.update(group for group in expanded if group in english_by_code)
+                    expanded = set(
+                        _expand_groups(comp_item.get("audience", []), selector_map)
+                    )
+                    english_target_groups.update(
+                        expanded.intersection(english_group_codes)
+                    )
             target_groups.update(english_target_groups)
         if not target_groups:
             continue
 
         case_cfg = _base_case_cfg(cfg)
         case_cfg["courses"] = _filter_courses(cfg, selector_map, target_groups)
-        case_cfg["students_groups"] = list(cfg.get("students_groups", []))
+        case_cfg["students_groups"] = _students_groups_without_kind(cfg)
         case_cfg["rooms"] = list(cfg.get("rooms", []))
         case_cfg["instructors"] = list(cfg.get("instructors", []))
         case_cfg["sections"] = list(cfg.get("sections", []))
@@ -142,13 +177,11 @@ def _generate_program_level_full_cases(candidate_path: Path, output_dir: Path) -
         cfg = yaml.safe_load(f)
 
     selector_map = _build_selector_map(cfg)
-    core_by_code = _index_distribution_by_kind(cfg, "core")
 
     for old_case in output_dir.glob("*.yaml"):
         old_case.unlink()
 
-    sections = cfg.get("sections", [])
-    core_section = next((s for s in sections if s.get("code") == "core"), None)
+    core_section = _section_by_code(cfg, "core")
     if not core_section:
         return
 
@@ -156,15 +189,16 @@ def _generate_program_level_full_cases(candidate_path: Path, output_dir: Path) -
     for program in core_section.get("programs", []):
         target_group_candidates.update(_group_codes_from_entries(program.get("groups")))
         for track in program.get("tracks", []):
-            target_group_candidates.update(_group_codes_from_entries(track.get("groups")))
-    target_group_candidates.intersection_update(core_by_code.keys())
+            target_group_candidates.update(
+                _group_codes_from_entries(track.get("groups"))
+            )
     target_groups = set(target_group_candidates)
     if not target_groups:
         return
 
     case_cfg = _base_case_cfg(cfg)
     case_cfg["courses"] = _filter_courses(cfg, selector_map, target_groups)
-    case_cfg["students_groups"] = list(cfg.get("students_groups", []))
+    case_cfg["students_groups"] = _students_groups_without_kind(cfg)
     case_cfg["rooms"] = list(cfg.get("rooms", []))
     case_cfg["instructors"] = list(cfg.get("instructors", []))
     case_cfg["sections"] = list(cfg.get("sections", []))
@@ -176,29 +210,32 @@ def _generate_program_level_full_cases(candidate_path: Path, output_dir: Path) -
     )
 
 
-def _generate_program_level_full_with_english_cases(candidate_path: Path, output_dir: Path) -> None:
+def _generate_program_level_full_with_english_cases(
+    candidate_path: Path, output_dir: Path
+) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     with candidate_path.open(encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
 
     selector_map = _build_selector_map(cfg)
-    core_by_code = _index_distribution_by_kind(cfg, "core")
-    english_by_code = _index_distribution_by_kind(cfg, "english")
+    english_group_codes = _section_group_codes(_section_by_code(cfg, "english"))
 
     for old_case in output_dir.glob("*.yaml"):
         old_case.unlink()
 
-    sections = cfg.get("sections", [])
-    core_section = next((s for s in sections if s.get("code") == "core"), None)
+    core_section = _section_by_code(cfg, "core")
     if not core_section:
         return
 
     academic_target_group_candidates: set[str] = set()
     for program in core_section.get("programs", []):
-        academic_target_group_candidates.update(_group_codes_from_entries(program.get("groups")))
+        academic_target_group_candidates.update(
+            _group_codes_from_entries(program.get("groups"))
+        )
         for track in program.get("tracks", []):
-            academic_target_group_candidates.update(_group_codes_from_entries(track.get("groups")))
-    academic_target_group_candidates.intersection_update(core_by_code.keys())
+            academic_target_group_candidates.update(
+                _group_codes_from_entries(track.get("groups"))
+            )
     academic_target_groups = set(academic_target_group_candidates)
 
     english_target_groups: set[str] = set()
@@ -208,7 +245,7 @@ def _generate_program_level_full_with_english_cases(candidate_path: Path, output
             continue
         for comp_item in course_item.get("components", []):
             expanded = set(_expand_groups(comp_item.get("audience", []), selector_map))
-            english_target_groups.update(group for group in expanded if group in english_by_code)
+            english_target_groups.update(expanded.intersection(english_group_codes))
 
     target_groups = set(academic_target_groups)
     target_groups.update(english_target_groups)
@@ -217,7 +254,7 @@ def _generate_program_level_full_with_english_cases(candidate_path: Path, output
 
     case_cfg = _base_case_cfg(cfg)
     case_cfg["courses"] = _filter_courses(cfg, selector_map, target_groups)
-    case_cfg["students_groups"] = list(cfg.get("students_groups", []))
+    case_cfg["students_groups"] = _students_groups_without_kind(cfg)
     case_cfg["rooms"] = list(cfg.get("rooms", []))
     case_cfg["instructors"] = list(cfg.get("instructors", []))
     case_cfg["sections"] = list(cfg.get("sections", []))
@@ -248,7 +285,9 @@ def main() -> None:
 
         if block == "block1":
             with_english_output_dir = tests_dir / f"feasible_full_with_english_{block}"
-            _generate_program_level_full_with_english_cases(candidate_path, with_english_output_dir)
+            _generate_program_level_full_with_english_cases(
+                candidate_path, with_english_output_dir
+            )
 
 
 if __name__ == "__main__":

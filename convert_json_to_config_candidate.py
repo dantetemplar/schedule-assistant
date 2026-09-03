@@ -986,10 +986,13 @@ def _build_output_instructors(
         for instructor_id in sorted(
             output_ids,
             key=lambda instructor_id: (
-                resolve_instructor(instructor_id).name_en
-                or resolve_instructor(instructor_id).name_ru
-                or instructor_id
-            ).casefold(),
+                (
+                    resolve_instructor(instructor_id).name_en
+                    or resolve_instructor(instructor_id).name_ru
+                    or instructor_id
+                ).casefold(),
+                instructor_id.casefold(),
+            ),
         )
     ]
 
@@ -1585,9 +1588,7 @@ def _collect_meeting_time_pairs(
     for course in course_items:
         for component in course.get("components") or []:
             component_groups = [
-                str(g)
-                for g in (component.get("audience") or [])
-                if str(g).strip()
+                str(g) for g in (component.get("audience") or []) if str(g).strip()
             ]
             for session in component.get("sessions") or []:
                 audience = [
@@ -1637,7 +1638,11 @@ def attach_program_semesters(
     program_semesters: dict[str, tuple[date, date]] | None = None,
 ) -> list[dict[str, Any]]:
     """Attach optional program.semester from parse-core / PROGRAM_SEMESTER map."""
-    windows = program_semesters if program_semesters is not None else load_program_semesters_from_parse_core()
+    windows = (
+        program_semesters
+        if program_semesters is not None
+        else load_program_semesters_from_parse_core()
+    )
     for section in sections:
         for program in section.get("programs") or []:
             code = str(program.get("code") or "").strip()
@@ -1750,7 +1755,6 @@ def collect_english_groups(
             out.append(
                 {
                     "code": gid,
-                    "kind": "english",
                     "name": gid,
                     "estimated_size": ENGLISH_GROUP_ESTIMATED_SIZE,
                     "students": [],
@@ -1770,7 +1774,6 @@ def build_students_groups(
         distribution.append(
             {
                 "code": gid,
-                "kind": "core",
                 "name": group.get("name", gid),
                 "estimated_size": group.get("estimated_size"),
                 "students": group.get("students", []),
@@ -2096,7 +2099,6 @@ def collect_elective_student_groups(
                 by_id[group_id] = {
                     "code": group_id,
                     "name": f"{title} · {parallel}",
-                    "kind": "elective",
                     "estimated_size": None,
                     "students": [],
                 }
@@ -2108,7 +2110,6 @@ def collect_elective_student_groups(
         by_id[group_id] = {
             "code": group_id,
             "name": title,
-            "kind": "elective",
             "estimated_size": estimated_size,
             "students": [],
         }
@@ -2314,11 +2315,7 @@ def expand_grouped_core_courses_to_rows(
         subject = course["subject"]
         sheet_name = str(course.get("google_sheet_name") or "").strip().casefold()
         expected_language = (
-            "RU"
-            if "ru program" in sheet_name
-            else "EN"
-            if sheet_name
-            else None
+            "RU" if "ru program" in sheet_name else "EN" if sheet_name else None
         )
         for component in course["components"]:
             audience = normalize_group_names(component["audience"])
@@ -2328,7 +2325,9 @@ def expand_grouped_core_courses_to_rows(
                     for group in audience
                     if not (
                         (program_by_group.get(group) or "").endswith(("_EN", "_RU"))
-                        and not (program_by_group[group]).endswith(f"_{expected_language}")
+                        and not (program_by_group[group]).endswith(
+                            f"_{expected_language}"
+                        )
                     )
                 ]
             if not audience:
@@ -2352,9 +2351,7 @@ def expand_grouped_core_courses_to_rows(
 
 def collapse_spanning_core_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Merge spreadsheet rows bounded by STARTS AT and TILL into one meeting."""
-    grouped: dict[tuple[Any, ...], list[tuple[int, dict[str, Any]]]] = defaultdict(
-        list
-    )
+    grouped: dict[tuple[Any, ...], list[tuple[int, dict[str, Any]]]] = defaultdict(list)
     for index, row in enumerate(rows):
         grouped[
             (
@@ -2411,8 +2408,7 @@ def collapse_spanning_core_rows(rows: list[dict[str, Any]]) -> list[dict[str, An
             )
             replacements[start_index] = merged
             removed.update(
-                index
-                for index, _ in ordered[start_position + 1 : end_position + 1]
+                index for index, _ in ordered[start_position + 1 : end_position + 1]
             )
             start_position = end_position + 1
 
@@ -2629,9 +2625,7 @@ def load_english_schedule(path: Path) -> dict[str, Any]:
             str(row[columns["English Course"]] or "").split()
         ).upper()
         instructor = " ".join(str(row[columns["Instructor"]] or "").split())
-        instructor_email = str(
-            row[columns["Instructor email"]] or ""
-        ).strip().lower()
+        instructor_email = str(row[columns["Instructor email"]] or "").strip().lower()
         day_token = " ".join(str(row[columns["Day"]] or "").split()).upper()
         start_time = normalize_time(str(row[columns["Time"]] or ""))
         room = _normalize_room_value(str(row[columns["Room"]] or ""))
@@ -2746,7 +2740,6 @@ def build_english_entities(
         student_groups.append(
             {
                 "code": group_code,
-                "kind": "english",
                 "name": group_code,
                 "estimated_size": len(group["students"]),
                 "students": list(group["students"]),
@@ -2828,8 +2821,7 @@ def build_english_entities(
         "courses": course_items,
         "instructors": [
             (
-                instructors_map.get(instructor_id)
-                or registry.by_id[instructor_id]
+                instructors_map.get(instructor_id) or registry.by_id[instructor_id]
             ).model_dump(mode="json", exclude_none=True)
             for instructor_id in sorted(instructor_ids)
         ],
@@ -2883,6 +2875,12 @@ def _collect_course_entity_refs(
 
 def extract_elective_entities(path: Path) -> dict[str, Any]:
     payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    sections = [
+        _strip_slot_preferences(deepcopy(section))
+        for section in (payload.get("term") or {}).get("sections") or []
+        if section.get("code") == "electives"
+    ]
+    _, group_to_section = _section_lookup_maps(sections)
     courses = [
         _strip_slot_preferences(deepcopy(course))
         for course in payload.get("courses") or []
@@ -2891,12 +2889,7 @@ def extract_elective_entities(path: Path) -> dict[str, Any]:
     student_groups = [
         _strip_slot_preferences(deepcopy(group))
         for group in payload.get("students_groups") or []
-        if group.get("kind") == "elective"
-    ]
-    sections = [
-        _strip_slot_preferences(deepcopy(section))
-        for section in (payload.get("term") or {}).get("sections") or []
-        if section.get("code") == "electives"
+        if group_to_section.get(str(group.get("code") or "").strip()) == "electives"
     ]
     room_ids, instructor_ids = _collect_course_entity_refs(courses)
     rooms = [
@@ -2969,9 +2962,7 @@ def merge_schedule_entities(
     if "ONLINE" in referenced_rooms and not any(
         str(room["id"]) == "ONLINE" for room in merged["rooms"]
     ):
-        merged["rooms"].append(
-            {"id": "ONLINE", "name": "Online", "features": {}}
-        )
+        merged["rooms"].append({"id": "ONLINE", "name": "Online", "features": {}})
     merged["instructors"] = _merge_keyed(
         generated.get("instructors") or [],
         english["instructors"],

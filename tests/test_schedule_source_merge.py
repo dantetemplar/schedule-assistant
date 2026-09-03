@@ -138,6 +138,7 @@ def test_build_english_entities_uses_full_and_short_course_names(
     assert entities["courses"][0]["name"] == "Academic Writing and Argumentation I"
     assert entities["courses"][0]["short_name"] == "AWA-I"
     assert entities["section"]["programs"][0]["tracks"][0]["name"] == "AWA-I"
+    assert "kind" not in entities["students_groups"][0]
 
 
 def test_english_section_uses_compact_groups_layout() -> None:
@@ -229,7 +230,17 @@ def test_extract_electives_keeps_only_linked_entities(tmp_path: Path) -> None:
                 "term": {
                     "sections": [
                         {"code": "core", "name": "Core"},
-                        {"code": "electives", "name": "Electives"},
+                        {
+                            "code": "electives",
+                            "name": "Electives",
+                            "programs": [
+                                {
+                                    "code": "ELECTIVES",
+                                    "name": "Electives",
+                                    "groups": ["EL", "MISSING"],
+                                }
+                            ],
+                        },
                     ]
                 },
                 "courses": [
@@ -257,8 +268,8 @@ def test_extract_electives_keeps_only_linked_entities(tmp_path: Path) -> None:
                     },
                 ],
                 "students_groups": [
-                    {"code": "CORE", "kind": "core"},
-                    {"code": "EL", "kind": "elective"},
+                    {"code": "CORE"},
+                    {"code": "EL"},
                 ],
                 "rooms": [{"id": "C1"}, {"id": "E1"}],
                 "instructors": [
@@ -276,16 +287,53 @@ def test_extract_electives_keeps_only_linked_entities(tmp_path: Path) -> None:
     assert [item["code"] for item in extracted["sections"]] == ["electives"]
     assert [item["name"] for item in extracted["courses"]] == ["Elective"]
     assert [item["code"] for item in extracted["students_groups"]] == ["EL"]
+    assert all("kind" not in item for item in extracted["students_groups"])
     assert [item["id"] for item in extracted["rooms"]] == ["E1"]
     assert extracted["instructors"] == [{"id": "elective@example.com"}]
+
+
+def test_extract_electives_includes_groups_nested_under_tracks(tmp_path: Path) -> None:
+    path = tmp_path / "electives.yaml"
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "term": {
+                    "sections": [
+                        {
+                            "code": "electives",
+                            "programs": [
+                                {
+                                    "code": "BS",
+                                    "tracks": [
+                                        {
+                                            "code": "TRACK",
+                                            "name": "Track",
+                                            "groups": ["EL"],
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    ]
+                },
+                "students_groups": [{"code": "EL"}, {"code": "ORPHAN"}],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    extracted = extract_elective_entities(path)
+
+    assert [item["code"] for item in extracted["students_groups"]] == ["EL"]
 
 
 def test_keyed_merge_replaces_source_owned_entities_idempotently() -> None:
     generated = {
         "term": {"sections": [{"code": "core"}, {"code": "english"}]},
         "students_groups": [
-            {"code": "CORE", "kind": "core"},
-            {"code": "ENG", "kind": "english", "students": []},
+            {"code": "CORE"},
+            {"code": "ENG", "students": []},
         ],
         "courses": [
             {"name": "Core", "section_code": "core", "components": []},
@@ -296,9 +344,7 @@ def test_keyed_merge_replaces_source_owned_entities_idempotently() -> None:
     }
     english = {
         "section": {"code": "english", "programs": []},
-        "students_groups": [
-            {"code": "ENG", "kind": "english", "students": ["student"]}
-        ],
+        "students_groups": [{"code": "ENG", "students": ["student"]}],
         "courses": [
             {
                 "name": "English",
@@ -310,7 +356,7 @@ def test_keyed_merge_replaces_source_owned_entities_idempotently() -> None:
     }
     electives = {
         "sections": [{"code": "electives"}],
-        "students_groups": [{"code": "EL", "kind": "elective"}],
+        "students_groups": [{"code": "EL"}],
         "courses": [
             {"name": "Elective", "section_code": "electives", "components": []}
         ],
@@ -331,9 +377,9 @@ def test_keyed_merge_replaces_source_owned_entities_idempotently() -> None:
 
     assert first == second
     assert len({group["code"] for group in first["students_groups"]}) == 3
-    assert next(
-        group for group in first["students_groups"] if group["code"] == "ENG"
-    )["students"] == ["student"]
+    assert next(group for group in first["students_groups"] if group["code"] == "ENG")[
+        "students"
+    ] == ["student"]
     assert {
         instructor["id"]: instructor.get("position")
         for instructor in first["instructors"]

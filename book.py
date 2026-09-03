@@ -193,16 +193,16 @@ def _group_name_from_code(group_code: str) -> str | None:
     return None
 
 
-def _section_category_from_kind(section_kind: str | None) -> str:
-    if section_kind is None:
+def _section_category_from_code(section_code: str | None) -> str:
+    if section_code is None:
         return "unknown"
-    if section_kind in ("core", "core_course"):
+    if section_code == "core":
         return "core"
-    if section_kind in ("electives", "elective"):
+    if section_code == "electives":
         return "elective"
-    if section_kind == "english":
+    if section_code == "english":
         return "english"
-    return section_kind
+    return section_code
 
 
 def _program_code_from_audiences(audiences: list[str]) -> str:
@@ -307,41 +307,38 @@ def build_section_program_maps(
     return group_to_program, selector_to_program
 
 
-def build_token_to_section_kind(cfg: ScheduleConfig) -> dict[str, str]:
-    token_to_kind: dict[str, str] = {}
+def build_token_to_section_code(cfg: ScheduleConfig) -> dict[str, str]:
+    token_to_section_code: dict[str, str] = {}
     for section in cfg.term.sections:
-        kind = str(section.code or "").strip().lower()
-        if not kind:
+        section_code = str(section.code or "").strip().lower()
+        if not section_code:
             continue
         for program in section.programs:
-            token_to_kind[f"@{program.code}"] = kind
+            token_to_section_code[f"@{program.code}"] = section_code
             for group in program.groups:
-                token_to_kind[group] = kind
+                token_to_section_code[group] = section_code
             for track in program.tracks:
-                token_to_kind[f"@{program.code}/{track.name}"] = kind
-                token_to_kind[f"@{program.code}/{track.code}"] = kind
+                token_to_section_code[f"@{program.code}/{track.name}"] = section_code
+                token_to_section_code[f"@{program.code}/{track.code}"] = section_code
                 for group in track.groups:
-                    token_to_kind[group] = kind
-    for group in cfg.students_groups:
-        code = group.code.strip()
-        kind = str(group.kind or "").strip().lower()
-        if code and kind and code not in token_to_kind:
-            token_to_kind[code] = kind
-    return token_to_kind
+                    token_to_section_code[group] = section_code
+    return token_to_section_code
 
 
-def resolve_section_kind(audiences: list[str], token_to_kind: dict[str, str]) -> str | None:
+def resolve_section_code(
+    audiences: list[str], token_to_section_code: dict[str, str]
+) -> str | None:
     for audience in audiences:
         token = audience.strip()
         if not token:
             continue
-        kind = token_to_kind.get(token)
-        if kind is not None:
-            return kind
+        section_code = token_to_section_code.get(token)
+        if section_code is not None:
+            return section_code
         if token.startswith("@") and "/" in token:
-            kind = token_to_kind.get(token.split("/", 1)[0])
-            if kind is not None:
-                return kind
+            section_code = token_to_section_code.get(token.split("/", 1)[0])
+            if section_code is not None:
+                return section_code
     return None
 
 
@@ -602,7 +599,7 @@ def _slots_from_session(
 def build_program_groups_from_config(cfg: ScheduleConfig) -> list[ProgramGroup]:
     known_room_ids = {room.id for room in cfg.rooms}
     group_to_program, selector_to_program = build_section_program_maps(cfg)
-    token_to_kind = build_token_to_section_kind(cfg)
+    token_to_section_code = build_token_to_section_code(cfg)
     audience_to_program = build_audience_to_program_code(cfg)
     program_semesters = build_program_semester_by_code(cfg)
     by_program: dict[str, dict[str, list[ComponentNode]]] = defaultdict(lambda: defaultdict(list))
@@ -644,8 +641,8 @@ def build_program_groups_from_config(cfg: ScheduleConfig) -> list[ProgramGroup]:
                     audiences=session_audiences,
                     program_name=program_name,
                     term=cfg.term,
-                    section_category=_section_category_from_kind(
-                        resolve_section_kind(session_audiences, token_to_kind)
+                    section_category=_section_category_from_code(
+                        resolve_section_code(session_audiences, token_to_section_code)
                     ),
                 )
                 by_program[program_name][course.name].append(
