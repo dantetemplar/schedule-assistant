@@ -1673,10 +1673,14 @@ def program_time_slots_subset_of_term(
 
 
 def _canonicalize_program_slot_pair(start: str, end: str) -> tuple[str, str]:
-    """Map known term starts to the canonical term end (ignore till/truncation)."""
+    """Map meetings starting inside a term slot to that canonical grid row."""
     term_end = TERM_END_BY_START.get(start)
     if term_end is not None:
         return start, term_end
+    start_minutes = _time_to_minutes(start)
+    for term_start, term_end in TERM_TIME_SLOTS:
+        if _time_to_minutes(term_start) <= start_minutes < _time_to_minutes(term_end):
+            return term_start, term_end
     return start, end
 
 
@@ -1688,8 +1692,8 @@ def attach_program_time_slots(
     """Set each program's time_slots from distinct meeting start/end pairs that touch it.
 
     Skips programs whose collected slots are a subset of term.time_slots (by start).
-    Meetings that start on a term slot use the term end (so till 13:00 does not
-    create a fake 12:40–13:00 program row).
+    Meetings that start on or inside a term slot use that grid row, so STARTS AT
+    and TILL modifiers do not create fake program-level rows.
     """
     program_groups: dict[str, set[str]] = {}
     for section in sections:

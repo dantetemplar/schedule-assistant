@@ -6,6 +6,7 @@ from openpyxl import Workbook, load_workbook
 
 from convert_json_to_config_candidate import (
     PROGRAMS,
+    _canonicalize_program_slot_pair,
     build_sections,
     collapse_spanning_core_rows,
     build_english_entities,
@@ -215,6 +216,10 @@ def test_core_rows_keep_english_and_russian_robotics_groups_distinct() -> None:
 def test_bachelor_robotics_group_codes_are_not_normalized_together() -> None:
     assert normalize_academic_group_id("B24-RO-01") == "B24-RO-01"
     assert normalize_academic_group_id("B24-RO15-01") == "B24-RO15-01"
+
+
+def test_program_slot_maps_starts_at_modifier_to_containing_term_slot() -> None:
+    assert _canonicalize_program_slot_pair("10:00", "13:00") == ("09:00", "10:30")
 
 
 def test_collapse_spanning_core_rows_merges_start_and_end_modifiers() -> None:
