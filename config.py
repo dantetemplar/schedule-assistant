@@ -1,11 +1,12 @@
 import datetime
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Literal, Self
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class SettingBaseModel(BaseModel):
@@ -300,6 +301,8 @@ class CourseConfig(SettingBaseModel):
     "Course name"
     section_code: str
     "Exactly one timetable section this course belongs to (term.sections[].code)"
+    color: str | None = None
+    "Optional course color in #RRGGBB format"
     short_name: str | None = None
     "Short English display name"
     name_ru: str | None = None
@@ -310,6 +313,16 @@ class CourseConfig(SettingBaseModel):
     "Subject-level staff with roles; preferred in event instructor pickers"
     components: list[Component]
     "Course subparts (lec/tut/lab/…) to schedule"
+
+    @field_validator("color")
+    @classmethod
+    def normalize_color(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.upper()
+        if not re.fullmatch(r"#[0-9A-F]{6}", normalized):
+            raise ValueError("color must use exact #RRGGBB format")
+        return normalized
 
 
 class ScheduleConfig(SettingBaseModel):

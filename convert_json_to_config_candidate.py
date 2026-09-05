@@ -618,12 +618,79 @@ _ENGLISH_COURSE_NAMES = frozenset(
     }
 )
 
+_COURSE_COLOR_RE = re.compile(r"#[0-9A-F]{6}")
+
 
 def normalize_class_tag(value: str | None) -> str:
     if value is None:
         return "class"
     cleaned = value.strip().lower()
     return CLASS_TAG_MAP.get(cleaned, cleaned.replace(" ", "_"))
+
+
+def normalize_course_color(value: Any) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).upper()
+    if not _COURSE_COLOR_RE.fullmatch(normalized):
+        raise ValueError(f"Invalid course color {value!r}; expected exact #RRGGBB")
+    return normalized
+
+
+def aggregate_course_colors(rows: list[dict[str, Any]]) -> dict[str, str]:
+    counts_by_course: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for row in rows:
+        course_name = normalize_lesson_name(str(row["lesson_name"]))
+        color = normalize_course_color(row.get("color"))
+        if color is not None:
+            counts_by_course[course_name][color] += 1
+
+    colors: dict[str, str] = {}
+    for course_name, counts in counts_by_course.items():
+        top_count = max(counts.values())
+        top_colors = sorted(
+            color for color, count in counts.items() if count == top_count
+        )
+        if len(top_colors) > 1:
+            raise ValueError(
+                f"Course {course_name!r} has tied top colors: "
+                f"{', '.join(top_colors)} ({top_count} each)"
+            )
+        colors[course_name] = top_colors[0]
+    return colors
+
+
+def _merge_course_entities(
+    *sources: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    def course_key(item: dict[str, Any]) -> tuple[str, str]:
+        return (
+            item["section_code"],
+            item.get("short_name") or item["name"],
+        )
+
+    merged = _merge_keyed(
+        *sources,
+        key=course_key,
+    )
+    color_rows_by_key: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for source in sources:
+        for course in source:
+            key = course_key(course)
+            color_rows_by_key[key].append(
+                {"lesson_name": key[1], "color": course.get("color")}
+            )
+
+    for course in merged:
+        key = course_key(course)
+        color = aggregate_course_colors(color_rows_by_key[key]).get(
+            normalize_lesson_name(str(key[1]))
+        )
+        if color is None:
+            course.pop("color", None)
+        else:
+            course["color"] = color
+    return merged
 
 
 def is_english_course(lesson_name: str) -> bool:
@@ -2344,6 +2411,7 @@ def expand_grouped_core_courses_to_rows(
             rows.append(
                 {
                     "lesson_name": subject,
+                    "color": normalize_course_color(course.get("color")),
                     "lesson_class_type": component.get("type"),
                     "weekday": component["weekday"],
                     "start_time": component["start_time"],
@@ -2957,14 +3025,10 @@ def merge_schedule_entities(
         electives["students_groups"],
         key=lambda item: item["code"],
     )
-    merged["courses"] = _merge_keyed(
+    merged["courses"] = _merge_course_entities(
         generated.get("courses") or [],
         english["courses"],
         electives["courses"],
-        key=lambda item: (
-            item["section_code"],
-            item.get("short_name") or item["name"],
-        ),
     )
     merged["rooms"] = _merge_keyed(
         generated.get("rooms") or [],
@@ -3157,6 +3221,7 @@ def main() -> None:
     group_order = build_group_order_from_sections(sections)
 
     def render_config(selected_rows: list[dict[str, Any]]) -> dict[str, Any]:
+        course_colors = aggregate_course_colors(selected_rows)
         selected_keys = {
             _pattern_key_from_row(row)
             for row in selected_rows
@@ -3312,6 +3377,9 @@ def main() -> None:
                     course_name, components, sections
                 ),
             }
+            course_color = course_colors.get(course_name)
+            if course_color is not None:
+                course_payload["color"] = course_color
             if is_elective_course:
                 short_name = course_short_names.get(course_name)
                 if short_name:

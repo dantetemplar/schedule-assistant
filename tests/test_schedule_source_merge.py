@@ -1,12 +1,16 @@
 from datetime import time
 from pathlib import Path
 
+import pytest
 import yaml
 from openpyxl import Workbook, load_workbook
+from pydantic import ValidationError
 
 from convert_json_to_config_candidate import (
     PROGRAMS,
     _canonicalize_program_slot_pair,
+    _merge_course_entities,
+    aggregate_course_colors,
     build_sections,
     collapse_spanning_core_rows,
     build_english_entities,
@@ -16,7 +20,7 @@ from convert_json_to_config_candidate import (
     merge_schedule_entities,
     normalize_academic_group_id,
 )
-from config import InstructorConfig, SectionConfig
+from config import CourseConfig, InstructorConfig, SectionConfig
 from instructors_roster import InstructorRegistry
 
 
@@ -173,6 +177,101 @@ def test_core_rows_exclude_groups_from_the_other_language_program() -> None:
     )
 
     assert rows[0]["group_name"] == ["B24-MFAI-03"]
+
+
+def test_core_rows_propagate_normalized_course_color() -> None:
+    rows = expand_grouped_core_courses_to_rows(
+        [
+            {
+                "subject": "Course",
+                "color": "#a1b2c3",
+                "google_sheet_name": "1st block common",
+                "components": [
+                    {
+                        "type": "lec",
+                        "weekday": "MONDAY",
+                        "start_time": "09:00",
+                        "end_time": "10:30",
+                        "audience": ["B24-SD-01"],
+                    }
+                ],
+            }
+        ]
+    )
+
+    assert rows[0]["color"] == "#A1B2C3"
+
+
+def test_core_rows_allow_missing_course_color() -> None:
+    rows = expand_grouped_core_courses_to_rows(
+        [
+            {
+                "subject": "Course",
+                "google_sheet_name": "1st block common",
+                "components": [
+                    {
+                        "type": "lec",
+                        "weekday": "MONDAY",
+                        "start_time": "09:00",
+                        "end_time": "10:30",
+                        "audience": ["B24-SD-01"],
+                    }
+                ],
+            }
+        ]
+    )
+
+    assert rows[0]["color"] is None
+
+
+def test_course_color_aggregation_uses_non_null_majority() -> None:
+    colors = aggregate_course_colors(
+        [
+            {"lesson_name": "Course", "color": "#112233"},
+            {"lesson_name": "Course", "color": None},
+            {"lesson_name": "Course", "color": "#112233"},
+            {"lesson_name": "Course", "color": "#AABBCC"},
+        ]
+    )
+
+    assert colors == {"Course": "#112233"}
+
+
+def test_course_color_aggregation_rejects_tied_top_colors() -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"Course 'Course' has tied top colors: #112233, #AABBCC",
+    ):
+        aggregate_course_colors(
+            [
+                {"lesson_name": "Course", "color": "#112233"},
+                {"lesson_name": "Course", "color": "#aabbcc"},
+            ]
+        )
+
+
+def test_course_config_normalizes_and_validates_color() -> None:
+    course = CourseConfig.model_validate(
+        {
+            "name": "Course",
+            "section_code": "core",
+            "color": "#a1b2c3",
+            "components": [],
+        }
+    )
+
+    assert course.color == "#A1B2C3"
+    invalid_colors = ["A1B2C3", "#12345", "#1234567", "#GGHHII", " #A1B2C3"]
+    for invalid_color in invalid_colors:
+        with pytest.raises(ValidationError, match="exact #RRGGBB"):
+            CourseConfig.model_validate(
+                {
+                    "name": "Course",
+                    "section_code": "core",
+                    "color": invalid_color,
+                    "components": [],
+                }
+            )
 
 
 def test_core_rows_keep_english_and_russian_robotics_groups_distinct() -> None:
@@ -440,3 +539,157 @@ def test_keyed_merge_replaces_source_owned_entities_idempotently() -> None:
         "professor@example.com": "Full Professor",
     }
     assert "slot_preferences" not in str(first)
+
+
+@pytest.mark.parametrize("renamed_color", [{}, {"color": None}])
+def test_course_merge_preserves_color_when_display_name_changes(
+    renamed_color: dict[str, None],
+) -> None:
+    original = {
+        "name": "Original",
+        "short_name": "COURSE",
+        "section_code": "core",
+        "color": "#aabbcc",
+        "components": [],
+    }
+    renamed = {
+        "name": "Renamed",
+        "short_name": "COURSE",
+        "section_code": "core",
+        "components": [{"tag": "class"}],
+        **renamed_color,
+    }
+
+    merged = _merge_course_entities([original], [renamed])
+
+    assert merged == [{**renamed, "color": "#AABBCC"}]
+
+
+def test_course_merge_uses_color_majority_across_different_display_names() -> None:
+    sources = [
+        [
+            {
+                "name": name,
+                "short_name": "COURSE",
+                "section_code": "core",
+                "color": color,
+                "components": [],
+            }
+        ]
+        for name, color in [
+            ("Original", "#aabbcc"),
+            ("Intermediate", "#AABBCC"),
+            ("Renamed", "#112233"),
+        ]
+    ]
+
+    merged = _merge_course_entities(*sources)
+
+    assert merged == [{**sources[-1][0], "color": "#AABBCC"}]
+
+
+def test_course_merge_rejects_color_ties_across_different_display_names() -> None:
+    sources = [
+        [
+            {
+                "name": name,
+                "short_name": "COURSE",
+                "section_code": "core",
+                "color": color,
+                "components": [],
+            }
+        ]
+        for name, color in [("Original", "#112233"), ("Renamed", "#aabbcc")]
+    ]
+
+    with pytest.raises(
+        ValueError,
+        match=r"Course 'COURSE' has tied top colors: #112233, #AABBCC",
+    ):
+        _merge_course_entities(*sources)
+
+
+def test_schedule_merge_uses_majority_course_color_across_sources() -> None:
+    generated = {
+        "term": {"sections": [{"code": "core"}]},
+        "courses": [
+            {
+                "name": "Course",
+                "section_code": "core",
+                "color": "#aabbcc",
+                "components": [],
+            }
+        ],
+    }
+    english = {
+        "section": {"code": "english"},
+        "students_groups": [],
+        "courses": [
+            {
+                "name": "Course",
+                "section_code": "core",
+                "color": "#AABBCC",
+                "components": [{"tag": "class"}],
+            }
+        ],
+        "instructors": [],
+    }
+    electives = {
+        "sections": [],
+        "students_groups": [],
+        "courses": [
+            {
+                "name": "Course",
+                "section_code": "core",
+                "color": "#112233",
+                "components": [],
+            }
+        ],
+        "rooms": [],
+        "instructors": [],
+    }
+
+    merged = merge_schedule_entities(generated, english, electives)
+
+    assert merged["courses"][0]["color"] == "#AABBCC"
+    assert merged["courses"][0]["components"] == []
+
+
+def test_schedule_merge_rejects_tied_course_colors() -> None:
+    generated = {
+        "term": {"sections": [{"code": "core"}]},
+        "courses": [
+            {
+                "name": "Course",
+                "section_code": "core",
+                "color": "#112233",
+                "components": [],
+            }
+        ],
+    }
+    english = {
+        "section": {"code": "english"},
+        "students_groups": [],
+        "courses": [
+            {
+                "name": "Course",
+                "section_code": "core",
+                "color": "#AABBCC",
+                "components": [],
+            }
+        ],
+        "instructors": [],
+    }
+    electives = {
+        "sections": [],
+        "students_groups": [],
+        "courses": [],
+        "rooms": [],
+        "instructors": [],
+    }
+
+    with pytest.raises(
+        ValueError,
+        match=r"Course 'Course' has tied top colors: #112233, #AABBCC",
+    ):
+        merge_schedule_entities(generated, english, electives)
