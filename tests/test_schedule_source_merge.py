@@ -318,7 +318,7 @@ def test_extract_electives_keeps_only_linked_entities(tmp_path: Path) -> None:
                 ],
                 "students_groups": [
                     {"code": "CORE"},
-                    {"code": "EL"},
+                    {"code": "EL", "kind": "elective"},
                 ],
                 "rooms": [{"id": "C1"}, {"id": "E1"}],
                 "instructors": [

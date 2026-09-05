@@ -2896,7 +2896,11 @@ def extract_elective_entities(path: Path) -> dict[str, Any]:
         if course.get("section_code") == "electives"
     ]
     student_groups = [
-        _strip_slot_preferences(deepcopy(group))
+        {
+            key: _strip_slot_preferences(deepcopy(value))
+            for key, value in group.items()
+            if key != "kind"
+        }
         for group in payload.get("students_groups") or []
         if group_to_section.get(str(group.get("code") or "").strip()) == "electives"
     ]
