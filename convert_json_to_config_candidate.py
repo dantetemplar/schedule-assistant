@@ -315,8 +315,8 @@ PROGRAMS: dict[str, list[dict[str, Any]]] = {
                 },
                 {
                     "name": "Robotics",
-                    "code": "RO",
-                    "groups": ["B26-RO-01"],
+                    "code": "RO15",
+                    "groups": ["B26-RO15-01"],
                 },
                 {
                     "name": "AI360",
@@ -375,8 +375,8 @@ PROGRAMS: dict[str, list[dict[str, Any]]] = {
                 },
                 {
                     "name": "Robotics",
-                    "code": "RO",
-                    "groups": ["B25-RO-01"],
+                    "code": "RO15",
+                    "groups": ["B25-RO15-01"],
                 },
             ],
         },
@@ -434,6 +434,11 @@ PROGRAMS: dict[str, list[dict[str, Any]]] = {
                     "name": "AI360",
                     "code": "AI360",
                     "groups": ["B24-AI360-01"],
+                },
+                {
+                    "name": "Robotics",
+                    "code": "RO15",
+                    "groups": ["B24-RO15-01"],
                 },
             ],
         },
@@ -506,7 +511,7 @@ GROUP_ESTIMATED_SIZE: dict[str, int] = {
     "B26-MFAI-04": 22,
     "B26-MFAI-05": 22,
     "B26-MFAI-06": 22,
-    "B26-RO-01": 21,
+    "B26-RO15-01": 21,
     "B25-CSE-01": 24,
     "B25-CSE-02": 24,
     "B25-CSE-03": 23,
@@ -523,7 +528,7 @@ GROUP_ESTIMATED_SIZE: dict[str, int] = {
     "B25-MFAI-03": 26,
     "B25-MFAI-04": 26,
     "B25-MFAI-05": 26,
-    "B25-RO-01": 2,
+    "B25-RO15-01": 2,
     "B24-SD-01": 28,
     "B24-SD-02": 31,
     "B24-SD-03": 28,
@@ -536,6 +541,7 @@ GROUP_ESTIMATED_SIZE: dict[str, int] = {
     "B24-AI-03": 26,
     "B24-GD-01": 18,
     "B24-RO-01": 8,
+    "B24-RO15-01": 8,
     "B24-MFAI-01": 18,
     "B24-MFAI-02": 24,
     "B24-MFAI-03": 21,
@@ -628,7 +634,6 @@ def is_english_course(lesson_name: str) -> bool:
 
 
 _ACADEMIC_GROUP_ID_FIXES: dict[str, str] = {
-    "B26-RO15-01": "B26-RO-01",
     "M26-RO-": "M26-RO-01",
     "M26-RO15-01": "M26-RO-01",
 }

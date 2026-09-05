@@ -13,6 +13,7 @@ from convert_json_to_config_candidate import (
     extract_elective_entities,
     load_english_schedule,
     merge_schedule_entities,
+    normalize_academic_group_id,
 )
 from config import InstructorConfig, SectionConfig
 from instructors_roster import InstructorRegistry
@@ -66,7 +67,7 @@ def test_load_english_schedule_builds_membership_and_expands_days(
             "code": "AWA-I-1",
             "course_name": "AWA-I",
             "students": ["student@innopolis.university"],
-            "academic_groups": ["B26-RO-01"],
+            "academic_groups": ["B26-RO15-01"],
             "instructor": "Alina Arslanova",
             "instructor_email": "a.arslanova@innopolis.ru",
             "weekly_pattern": [
@@ -171,6 +172,49 @@ def test_core_rows_exclude_groups_from_the_other_language_program() -> None:
     )
 
     assert rows[0]["group_name"] == ["B24-MFAI-03"]
+
+
+def test_core_rows_keep_english_and_russian_robotics_groups_distinct() -> None:
+    rows = expand_grouped_core_courses_to_rows(
+        [
+            {
+                "subject": "Shared Robotics Course",
+                "google_sheet_name": "1st block common",
+                "components": [
+                    {
+                        "type": "lab",
+                        "weekday": "THURSDAY",
+                        "start_time": "12:40",
+                        "end_time": "14:10",
+                        "audience": ["B24-RO-01"],
+                    }
+                ],
+            },
+            {
+                "subject": "Shared Robotics Course",
+                "google_sheet_name": "Ru Programs",
+                "components": [
+                    {
+                        "type": "lab",
+                        "weekday": "THURSDAY",
+                        "start_time": "12:40",
+                        "end_time": "14:10",
+                        "audience": ["B24-RO15-01"],
+                    }
+                ],
+            },
+        ]
+    )
+
+    assert [row["group_name"] for row in rows] == [
+        ["B24-RO-01"],
+        ["B24-RO15-01"],
+    ]
+
+
+def test_bachelor_robotics_group_codes_are_not_normalized_together() -> None:
+    assert normalize_academic_group_id("B24-RO-01") == "B24-RO-01"
+    assert normalize_academic_group_id("B24-RO15-01") == "B24-RO15-01"
 
 
 def test_collapse_spanning_core_rows_merges_start_and_end_modifiers() -> None:
