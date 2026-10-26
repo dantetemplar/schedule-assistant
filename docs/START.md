@@ -77,7 +77,7 @@ Use this section as a living list of scenarios that affect modeling, input schem
 - `Priority`: high
 - `Context`: Programs (including Russian track / different years) may start and end on dates different from `term.semester`.
 - `Expected behavior`: Classes for those groups are only placed within their own active date window while still respecting shared resources (rooms/instructors) with other programs. Joint audiences use the intersection of windows.
-- `Solver impact`: hard constraint (program availability window per group/program) + preprocessing (derive eligible dates per class instance) — solver wiring still roadmap; booking/meetings expansion already uses program windows.
+- `Solver impact`: hard constraint (program availability window per group/program) + preprocessing (derive eligible dates per class instance). Standalone booking expansion uses program windows and optional session `active`; solver enforcement belongs to the separately maintained backend and is not verified here.
 - `Open questions`: Whether shared courses between tracks with empty intersection should be split into separate class instances.
 
 ### English-stream groups across academic groups
@@ -157,7 +157,7 @@ Use existing university schedules in Google Sheets as both a bootstrap source an
 
 ### Input: YAML config file
 
-The canonical input shape is defined by Pydantic models in [`config.py`](../config.py) (`ScheduleConfig` and nested types). Load with `ScheduleConfig.from_yaml(path)`.
+The canonical input shape is defined by Pydantic models in [`config.py`](../config.py) (`ScheduleConfig` and nested types). Load with `ScheduleConfig.from_yaml(path)`. The original solver sketches below use older field names; see **Implemented blocks and session windows** for current standalone fields and the runtime boundary.
 
 Top-level fields:
 
@@ -292,11 +292,56 @@ constraints:
       same_room: 1.0
 ```
 
-Roadmap items not in `ScheduleConfig` yet (domain doc may still discuss them): trimester blocks (`block_1` / `block_2`), per-program date windows, per-instructor slot preferences and caps in YAML, per-class room features, `pinned` placements, and per-course `class_constraints` lists. Prefer extending `config.py` first, then this document.
+### Implemented blocks and session windows
 
-### Output: YAML schedule file
+The current standalone `config.py` uses `term.sections`, `students_groups`, and `courses[].components` (not the older `programs` / `student_groups` / `classes` sketch above). The constraint tables and example above describe the original solver design, not the current standalone schema.
 
-Written by `main.py` via `yaml.safe_dump` (default path `--output`, usually `schedule.yaml`). Not modeled by `ScheduleConfig`. A concrete nested example is [`../output.yaml`](../output.yaml).
+- `term.blocks: list[TermBlock]` defaults to `[]`. Each preset has `id`, `name`, inclusive `start_date`, and inclusive `end_date`.
+- `courses[].blocks: list[str] | null` defaults to `null` (whole-semester pool). An explicit list assigns the course to named block pools. These block ids are **course pool/filter metadata only**; neither null nor a list clips, infers, or generates meeting dates.
+- `courses[].components[].sessions[].active: DateRange | null` defaults to `null`. It stores **raw inclusive dates**, not a block id. Selecting a block preset copies its dates; changing or deleting that preset does not change an existing session range.
+- With `active: null`, weekly expansion uses the session audience's program windows. `program.semester`, when present, **replaces** `term.semester` for that program (it may extend beyond either term boundary); groups without an override use `term.semester`. A shared audience uses the intersection of all its program windows. An empty session audience inherits the component audience; an empty or unknown audience otherwise uses the term default.
+- With an explicit `active`, weekly expansion intersects that raw range with the audience window. An empty intersection emits no weekly meetings. Same-audience sessions with different ranges remain separate.
+- `weekly_pattern[].alternation: {anchor_week: YYYY-MM-DD}` selects every second week in a fixed phase, normalized using `term.starting_day`. Filtering to a session range or copying it from another block does **not** restart that phase. Per-week edits apply only to active source dates. Concrete `dates_pattern` entries and explicit moves are retained, even outside the range, rather than silently discarded.
+
+Current-schema example:
+
+```yaml
+term:
+  name: Fall 2026
+  semester: {start_date: 2026-09-01, end_date: 2026-12-27}
+  blocks:
+    - id: block_1
+      name: First block
+      start_date: 2026-09-01
+      end_date: 2026-10-25
+courses:
+  - name: Example
+    section_code: core
+    blocks: [block_1] # metadata only
+    components:
+      - tag: lec
+        audience: [G1]
+        sessions:
+          - active: {start_date: 2026-09-01, end_date: 2026-10-25}
+            weekly_pattern:
+              - weekday: TUESDAY
+                start_time: "09:00"
+                end_time: "10:30"
+                alternation: {anchor_week: 2026-08-31}
+          - active: null # audience program window, not the course's blocks
+            weekly_pattern:
+              - weekday: THURSDAY
+                start_time: "09:00"
+                end_time: "10:30"
+```
+
+**Runtime/solver boundary:** this standalone repository implements the models and booking expansion in `book.py`. Weekly bookings are clipped before edits; alternating slots are emitted as individual dated bookings because the booking API path here supports weekly, not biweekly, recurrence. The solver and metrics were moved to `schedule-builder-backend` (`scripts/solve.py`, `scripts/metrics.py`; see `README.md`). There is no local `main.py`, `meetings.py`, or `metrics.py` to wire or verify. Schema acceptance and correct booking expansion do **not** establish that the separate solver honors windows in candidate generation, conflict constraints, or output. Those paths require independent implementation and tests in the backend; `course.blocks` must never become a solver date constraint.
+
+Roadmap items not in `ScheduleConfig` yet: per-instructor slot preferences and caps in YAML, per-component room requirements, `pinned` placements, and per-course `class_constraints` lists. Date windows and block metadata are already modeled; automatic burst scheduling remains a separate solver capability.
+
+### Output: original solver design
+
+The following output sketch describes the original `main.py` implementation, which is no longer present in this repository. For the current backend solver command and output location, use `README.md`; do not treat this historical shape as the current backend contract.
 
 **Top level**
 
@@ -386,8 +431,8 @@ These map from UniTime's constraint model (see `docs/REVERSE.md` §3.3, §4) to 
 | 5 | **Room capacity** | `room_capacity` | Domain filtering in `Lecture.computeValues()` §3.2 | Soft penalty by default (`3.0`); can be set to `"hard"` in YAML |
 | 6 | **Required count per subpart** | (structural) | Completeness in `GeneralSolutionComparator` §3.5 | For each class subpart (`tag`), solver places exactly `required_count` meetings (per generated instance when `per_group: true`) |
 | 7 | **Allowed slots** | `allowed_slots` | Domain filtering | Class can only be placed in allowed slot grids |
-| 8 | **Block eligibility** | (not in `ScheduleConfig` yet) | Date-pattern restrictions | Roadmap: dates per block / burst windows |
-| 9 | **Program availability window** | `program.semester` (optional DateRange) | Date-pattern restrictions | Hard/soft: expand weekly meetings only within `program.semester` (default `term.semester`); joint audiences use intersection |
+| 8 | **Session date window** | `sessions[].active` (optional DateRange) | Date-pattern restrictions | Implemented in standalone booking expansion; backend solver enforcement is not verified here. `term.blocks` are presets and `course.blocks` is metadata, not eligibility. |
+| 9 | **Program availability window** | `program.semester` (optional DateRange) | Date-pattern restrictions | Standalone weekly booking expansion uses `program.semester` (default `term.semester`); joint audiences use intersection. Backend solver enforcement is separate. |
 
 Additional global soft objectives (same `constraints.weights` map): `minimize_gaps_for_groups`, `instructor_max_per_day`, `time_preference`, `too_big_room`.
 
@@ -417,15 +462,7 @@ Weighted sum, minimized — ids match `ConstraintType` in [`config.py`](../confi
 
 ## Architecture
 
-```
-schedule-assistant/
-├── main.py                 # argparse CLI + CP-SAT wiring (current entry point)
-├── config.py               # Pydantic input schema: ScheduleConfig, enums, defaults
-├── config_tui.py           # optional TUI for configuration
-├── convert_json_to_config_candidate.py  # import helpers
-├── pyproject.toml          # project metadata and dependencies
-└── uv.lock                 # lockfile (uv)
-```
+The standalone repository contains `config.py` (schema), `book.py` (booking TUI and expansion), `convert_json_to_config_candidate.py` (imports), and supporting data tools/tests. The former solver entry point and metrics live in the separate backend; no local solver modules are present.
 
 ## Tech Stack
 
@@ -438,10 +475,13 @@ schedule-assistant/
 ## CLI Interface
 
 ```bash
-cd schedule-assistant
-uv run python main.py config.yaml --output schedule.yaml
-# Optional: --time-limit SECONDS (default 60), --no-progress
+# Standalone booking preview/TUI (booking actions require API credentials):
+uv run python book.py --config config.yaml
+# Solver, from the separate schedule-builder-backend repository:
+uv run --group solver python scripts/solve.py path/to/config.yaml --no-progress
 ```
+
+For backend output locations and metrics commands, see `README.md`. The implementation checklist below is historical design work, not a claim that local solver modules still exist.
 
 ## Non-Goals for v1
 
@@ -451,7 +491,7 @@ uv run python main.py config.yaml --output schedule.yaml
 - No event management
 - No Minimum Perturbation Problem (incremental re-scheduling)
 - No room sharing / distance constraints (single building)
-- No burst windows or per-class date ranges in the input schema until modeled in `ScheduleConfig` (see Cases above for roadmap intent)
+- No automatic burst scheduling implemented in this standalone repository; `sessions[].active` date ranges are already in the input schema
 - No department balancing
 
 ## Migration Path from UniTime Concepts
@@ -460,7 +500,7 @@ uv run python main.py config.yaml --output schedule.yaml
 |---|---|
 | `Lecture` (decision variable) | A class instance (`course` + `tag` + optional per-group instance) to schedule |
 | `Placement = (TimeLocation, RoomLocation)` | `(date, slot, room_id)` tuple |
-| `TimeLocation` (day code + start slot + length) | Slot index within `term.time_slots` + `duration_slots`; optional date filters are roadmap |
+| `TimeLocation` (day code + start slot + length) | Slot grid plus `program.semester` and optional `sessions[].active` in the current schema; backend solver support must be checked separately |
 | `RoomLocation` | `room_id` from `rooms` list |
 | `JenrlConstraint` (joint enrollment) | Group no-overlap + `no_student_overlap_by_membership` |
 | `InstructorConstraint` | Instructor no-overlap |

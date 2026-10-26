@@ -1,5 +1,6 @@
 """prompt_toolkit TUI to preview and batch-book courses from ScheduleConfig via room-booking BMP API."""
 
+from __future__ import annotations
 
 import argparse
 import os
@@ -275,6 +276,30 @@ def resolve_audience_semester(
     return TermConfig.DateRange(start_date=start, end_date=end)
 
 
+def resolve_session_window(
+    cfg: ScheduleConfig,
+    audiences: list[str],
+    active: TermConfig.DateRange | None,
+    *,
+    audience_to_program: dict[str, str] | None = None,
+    program_semesters: dict[str, TermConfig.DateRange] | None = None,
+) -> TermConfig.DateRange | None:
+    """Intersect explicit session dates with audience dates; blocks do not bound dates."""
+    window = resolve_audience_semester(
+        cfg,
+        audiences,
+        audience_to_program=audience_to_program,
+        program_semesters=program_semesters,
+    )
+    if active is None or window is None:
+        return window
+    start = max(window.start_date, active.start_date)
+    end = min(window.end_date, active.end_date)
+    if start > end:
+        return None
+    return TermConfig.DateRange(start_date=start, end_date=end)
+
+
 def union_semester_window(cfg: ScheduleConfig) -> TermConfig.DateRange:
     term = cfg.term
     start = term.semester.start_date
@@ -412,6 +437,22 @@ def _weekly_meeting_dates_in_window(window: TermConfig.DateRange, weekday: str) 
     return dates
 
 
+def _active_weekly_meeting_dates(
+    pattern: WeeklyPatternSlot,
+    term: TermConfig,
+    window: TermConfig.DateRange,
+) -> list[date]:
+    dates = _weekly_meeting_dates_in_window(window, str(pattern.weekday))
+    if pattern.alternation is None:
+        return dates
+    anchor = week_start_for_date(pattern.alternation.anchor_week, term.starting_day)
+    return [
+        meeting_date
+        for meeting_date in dates
+        if (week_start_for_date(meeting_date, term.starting_day) - anchor).days % 14 == 0
+    ]
+
+
 def _edit_for_meeting_date(
     meeting_date: date,
     edits: list[WeeklyPatternSlotEdit],
@@ -450,10 +491,10 @@ def _resolved_weekly_meeting(
 def _recurrence_segments_excluding_edit_weeks(
     term: TermConfig,
     window: TermConfig.DateRange,
-    weekday: str,
+    pattern: WeeklyPatternSlot,
     excluded_week_starts: set[date],
 ) -> list[tuple[date, date]]:
-    meeting_dates = _weekly_meeting_dates_in_window(window, weekday)
+    meeting_dates = _active_weekly_meeting_dates(pattern, term, window)
     active_dates = [
         meeting_date
         for meeting_date in meeting_dates
@@ -518,7 +559,7 @@ def _slots_from_weekly_pattern(
 
     slots: list[SlotRow] = []
     excluded_week_starts: set[date] = set()
-    for meeting_date in _weekly_meeting_dates_in_window(window, day_label):
+    for meeting_date in _active_weekly_meeting_dates(pattern, term, window):
         edit = _edit_for_meeting_date(meeting_date, edits, term)
         if edit is None or not _edit_changes_meeting(edit):
             continue
@@ -539,18 +580,22 @@ def _slots_from_weekly_pattern(
         )
 
     for segment_index, (segment_start, segment_end) in enumerate(
-        _recurrence_segments_excluding_edit_weeks(term, window, day_label, excluded_week_starts)
+        _recurrence_segments_excluding_edit_weeks(term, window, pattern, excluded_week_starts)
     ):
         slots.append(
             _make_slot_row(
                 slot_id=f"{slot_id_prefix}#w{pattern_index}#s{segment_index}",
-                meeting_date=day_label,
+                meeting_date=segment_start if pattern.alternation else day_label,
                 start_time=start_time,
                 end_time=end_time,
                 room=base_room,
                 known_room_ids=known_room_ids,
-                recurring=True,
-                recurrence=_weekly_recurrence_for_segment(day_label, segment_start, segment_end),
+                recurring=pattern.alternation is None,
+                recurrence=(
+                    _weekly_recurrence_for_segment(day_label, segment_start, segment_end)
+                    if pattern.alternation is None
+                    else None
+                ),
             )
         )
     return slots
@@ -559,7 +604,7 @@ def _slots_from_weekly_pattern(
 def _slots_from_session(
     session: ComponentSessionSeries,
     term: TermConfig,
-    window: TermConfig.DateRange,
+    window: TermConfig.DateRange | None,
     known_room_ids: set[str],
     *,
     slot_id_prefix: str,
@@ -581,6 +626,9 @@ def _slots_from_session(
                 disabled_reason=reason,
             )
         )
+
+    if window is None:
+        return slots
 
     for index, pattern in enumerate(session.weekly_pattern or []):
         slots.extend(
@@ -610,13 +658,14 @@ def build_program_groups_from_config(cfg: ScheduleConfig) -> list[ProgramGroup]:
                 session_audiences = _session_audiences(component, session)
                 if not session_audiences:
                     continue
-                window = resolve_audience_semester(
+                window = resolve_session_window(
                     cfg,
                     session_audiences,
+                    session.active,
                     audience_to_program=audience_to_program,
                     program_semesters=program_semesters,
                 )
-                if window is None:
+                if window is None and not session.dates_pattern:
                     continue
                 program_name = _resolve_program_for_audiences(
                     session_audiences,

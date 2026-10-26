@@ -43,6 +43,17 @@ class TermTimeSlot(SettingBaseModel):
     "Slot end time"
 
 
+class TermBlock(SettingBaseModel):
+    id: str
+    "Stable block identifier used only by course pool metadata"
+    name: str
+    "Human-readable teaching block name"
+    start_date: datetime.date
+    "Inclusive block start date"
+    end_date: datetime.date
+    "Inclusive block end date"
+
+
 class TermConfig(SettingBaseModel):
     class DateRange(SettingBaseModel):
         start_date: datetime.date
@@ -54,6 +65,8 @@ class TermConfig(SettingBaseModel):
     "Academic term name (for example, Fall 2025)"
     semester: DateRange
     "Single teaching period (start and end dates inclusive)"
+    blocks: list[TermBlock] = Field(default_factory=list)
+    "Named date presets; session active ranges store raw dates, not block references"
     days: list[Weekday] = [
         Weekday.MONDAY,
         Weekday.TUESDAY,
@@ -203,6 +216,13 @@ class WeeklyPatternSlotEdit(SettingBaseModel):
     "Optional instructor id(s); defaults to the pattern instructor"
 
 
+class WeeklyAlternation(SettingBaseModel):
+    """Every-two-week phase, independent of session window boundaries."""
+
+    anchor_week: datetime.date
+    "Date identifying an active week, normalized using term.starting_day"
+
+
 class WeeklyPatternSlot(SettingBaseModel):
     """Fixed weekly day/time for one meeting in a recurring core-course component."""
 
@@ -216,6 +236,8 @@ class WeeklyPatternSlot(SettingBaseModel):
     "Room id from spreadsheet (for example, 460 or ONLINE)"
     instructor: str | list[str] | None = None
     "Instructor id, or list of ids for co-teaching"
+    alternation: WeeklyAlternation | None = None
+    "None means weekly; otherwise every two weeks in the anchor phase for the whole semester"
     edits: list[WeeklyPatternSlotEdit] | None = None
     "Per-week overrides or cancellations keyed by ``select_week``"
 
@@ -249,6 +271,8 @@ class ComponentSessionSeries(SettingBaseModel):
 
     audience: list[str] = []
     "Student group ids for this session series (subset of component audience)"
+    active: TermConfig.DateRange | None = None
+    "Optional inclusive raw date window for weekly expansion; None uses audience program windows"
     weekly_pattern: list[WeeklyPatternSlot] | None = None
     "Fixed weekly slots for core courses"
     dates_pattern: list[SessionOccurrence] | None = None
@@ -301,6 +325,8 @@ class CourseConfig(SettingBaseModel):
     "Course name"
     section_code: str
     "Exactly one timetable section this course belongs to (term.sections[].code)"
+    blocks: list[str] | None = None
+    "Course pool metadata referencing term.blocks ids; None means whole-semester pool, never bounds meeting dates"
     color: str | None = None
     "Optional course color in #RRGGBB format"
     short_name: str | None = None
